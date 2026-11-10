@@ -135,6 +135,20 @@ describe("BoatApiClient", () => {
     }),
   );
 
+  it.effect("sends the durable request id as the create idempotency key", () =>
+    Effect.gen(function* () {
+      const { client, requests } = setup([{ body: details, status: 202 }, { body: details }]);
+      const created = yield* client.createSandbox({
+        name: "dev",
+        requestId: "resource-create-op",
+      });
+      expect(created.sandboxId).toBe(sandbox.id);
+      expect(requests[0]?.headers["idempotency-key"]).toBe("resource-create-op");
+      // A retry losing the create response reallocates the same sandbox, not a new one.
+      expect(requests[0]?.path).toContain("/sandboxes");
+    }),
+  );
+
   it.effect("resumes and stops through action endpoints, then reads canonical state", () =>
     Effect.gen(function* () {
       const { client, requests } = setup([

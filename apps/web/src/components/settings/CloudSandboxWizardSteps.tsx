@@ -1,5 +1,4 @@
-import { BOAT_SANDBOX_HOURLY_USD, BoatSandboxSize } from "@t3tools/contracts";
-import { BOAT_SIZE_LABELS } from "@t3tools/client-runtime/state/cloudSandbox";
+import { SandboxMachineType } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { CheckIcon } from "lucide-react";
 import { Radio as RadioPrimitive } from "@base-ui/react/radio";
@@ -11,7 +10,7 @@ import { SettingsGroup } from "./SettingsGroup";
 import { SettingsRow } from "./settingsLayout";
 import type { CloudSandboxDraft } from "./AddEnvironmentDialog.logic";
 
-const isBoatSandboxSize = Schema.is(BoatSandboxSize);
+const isSandboxMachineType = Schema.is(SandboxMachineType);
 
 const AUTO_STOP_OPTIONS = [
   { value: 15, label: "15 minutes" },
@@ -22,18 +21,20 @@ const AUTO_STOP_OPTIONS = [
   { value: 480, label: "8 hours" },
 ] as const;
 
+// boat.dev's machines; rates mirror the boat driver's published pricing.
 const BOAT_SIZES = [
-  { value: "small", label: BOAT_SIZE_LABELS.small, specs: "2 vCPU · 4 GB RAM" },
-  { value: "default", label: BOAT_SIZE_LABELS.default, specs: "4 vCPU · 8 GB RAM" },
-  { value: "large", label: BOAT_SIZE_LABELS.large, specs: "8 vCPU · 16 GB RAM" },
-  { value: "xlarge", label: BOAT_SIZE_LABELS.xlarge, specs: "16 vCPU · 32 GB RAM" },
+  { value: "small", label: "Small", specs: "2 vCPU · 4 GB RAM", hourlyUsd: 0.018 },
+  { value: "default", label: "Standard", specs: "4 vCPU · 8 GB RAM", hourlyUsd: 0.036 },
+  { value: "large", label: "Large", specs: "8 vCPU · 16 GB RAM", hourlyUsd: 0.072 },
+  { value: "xlarge", label: "Extra Large", specs: "16 vCPU · 32 GB RAM", hourlyUsd: 0.144 },
 ] as const satisfies ReadonlyArray<{
-  value: BoatSandboxSize;
+  value: SandboxMachineType;
   label: string;
   specs: string;
+  hourlyUsd: number;
 }>;
 
-const formatHourlyUsd = (size: BoatSandboxSize) => `$${BOAT_SANDBOX_HOURLY_USD[size].toFixed(3)}/h`;
+const formatHourlyUsd = (hourlyUsd: number) => `$${hourlyUsd.toFixed(3)}/h`;
 
 /**
  * Step 2 of the sandbox wizard: the API key for the provider picked on the
@@ -108,7 +109,7 @@ export function CloudSandboxDefaults({
             disabled={disabled}
             value={draft.defaultSize}
             onValueChange={(size) => {
-              if (isBoatSandboxSize(size)) {
+              if (isSandboxMachineType(size)) {
                 onChange({ ...draft, defaultSize: size });
               }
             }}
@@ -128,7 +129,7 @@ export function CloudSandboxDefaults({
                   </RadioPrimitive.Indicator>
                 </div>
                 <span className="text-xs">{size.specs}</span>
-                <span className="text-xs">{formatHourlyUsd(size.value)}</span>
+                <span className="text-xs">{formatHourlyUsd(size.hourlyUsd)}</span>
               </RadioPrimitive.Root>
             ))}
           </RadioGroupPrimitive>

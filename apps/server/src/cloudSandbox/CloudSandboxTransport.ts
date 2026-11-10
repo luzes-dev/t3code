@@ -1,4 +1,8 @@
-import { createCloudSandboxDriver, ensureCloudSandboxReady } from "@t3tools/cloud-sandbox";
+import {
+  CloudSandboxDriverFactory,
+  ensureCloudSandboxReady,
+  cloudSandboxDriverFactoryLayer,
+} from "@t3tools/cloud-sandbox";
 import {
   AuthAccessTokenType,
   AuthEnvironmentBootstrapTokenType,
@@ -146,6 +150,7 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const config = yield* ServerConfig.ServerConfig;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const drivers = yield* CloudSandboxDriverFactory;
   const manager = yield* SshEnvironmentManager;
   const scope = yield* Scope.Scope;
   const sshKeygenCommand = yield* resolveSshKeygenCommand;
@@ -214,7 +219,7 @@ export const make = Effect.gen(function* () {
       const client = yield* HttpClient.HttpClient;
       const digest = yield* Digest.Digest;
       const publicKey = yield* ensureKey;
-      const driver = yield* createCloudSandboxDriver(input.driverKind, {
+      const driver = yield* drivers.create(input.driverKind, {
         apiKey: input.apiKey,
         httpClient: client,
       });
@@ -380,4 +385,5 @@ export const make = Effect.gen(function* () {
 export const layer = Layer.effect(CloudSandboxTransport, make).pipe(
   Layer.provide(SshEnvironmentManager.layer({ resolveCliRunner: cloudSandboxCliRunner })),
   Layer.provide(SshAuth.SshPasswordPrompt.disabledLayer),
+  Layer.provide(cloudSandboxDriverFactoryLayer),
 );

@@ -262,10 +262,15 @@ profile requires deleting its sandboxes first. On mobile the same controls are o
 environment's settings page.
 
 Sandboxes stop on their own after the auto-stop window, unless agent work is active. T3 Code
-never starts a stopped sandbox by itself: you or an agent resumes it. Once the budget is reached,
-new sandboxes are refused. The budget counts running and stopped sandboxes, plus the minimum
-window the new one would run. A stopped sandbox's disk is deleted once its source thread is
-deleted, or at any time from the Cloud sandboxes section.
+never starts a stopped sandbox by itself: you or an agent resumes it. Disconnecting a sandbox
+stops routing to it but does not stop its compute: it stays billed until the auto-stop window
+closes, and the sandboxes list says so. Stopping always stops the billable runtime.
+
+Once the budget is reached, new sandboxes are refused. The budget counts running and stopped
+sandboxes, plus the minimum window the new one would run. When the provider does not report a
+price for a machine, a configured budget refuses that machine rather than guessing it free. A
+stopped sandbox's disk is deleted once its source thread is deleted, or at any time from the
+Cloud sandboxes section.
 
 Running processes are not copied to a sandbox. Filesystem worktrees remain the default.
 

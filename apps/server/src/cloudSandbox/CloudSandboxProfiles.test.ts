@@ -1,4 +1,5 @@
 import { expect, it } from "@effect/vitest";
+import * as TestClock from "effect/testing/TestClock";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { EnvironmentId, ManagedCloudSandboxResourceId, SandboxProfileId } from "@t3tools/contracts";
@@ -116,5 +117,16 @@ it.effect("counts a resource's spend once when its release is recorded again", (
     expect((yield* profiles.recordSpend(profileId, "owned", 5)).usd).toBe(5);
     expect((yield* profiles.recordSpend(profileId, "owned", 5)).usd).toBe(5);
     expect((yield* profiles.recordSpend(profileId, "other", 2)).usd).toBe(7);
+  }).pipe(Effect.provide(layer), Effect.scoped),
+);
+
+it.effect("resets monthly spend at the period boundary", () =>
+  Effect.gen(function* () {
+    const profiles = yield* Profiles.CloudSandboxProfiles;
+    yield* profiles.save({ ...input, apiKey: "working-key" });
+    expect((yield* profiles.recordSpend(profileId, "a", 5)).usd).toBe(5);
+    yield* TestClock.adjust("31 days");
+    expect(yield* profiles.spendOf(profileId)).toBeNull();
+    expect((yield* profiles.recordSpend(profileId, "b", 2)).usd).toBe(2);
   }).pipe(Effect.provide(layer), Effect.scoped),
 );

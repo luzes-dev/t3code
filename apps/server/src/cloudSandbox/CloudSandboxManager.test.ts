@@ -6,8 +6,82 @@ import * as TestClock from "effect/testing/TestClock";
 import { CloudSandboxRenewalsEnabled } from "./CloudSandboxManager.ts";
 import { expect, it } from "@effect/vitest";
 import { ManagedCloudSandboxResourceId, SandboxProfileId } from "@t3tools/contracts";
+import type { CloudSandboxDetails } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import {
+  CloudSandboxDriverFactory,
+  CloudSandboxError,
+  createCloudSandboxDriver,
+} from "@t3tools/cloud-sandbox";
+import type { BaseCloudSandboxDriver } from "@t3tools/cloud-sandbox";
 import { fixture } from "./CloudSandboxManager.testkit.ts";
+
+/**
+ * A second provider with machine types boat.dev does not have and none of the
+ * optional capabilities. It proves the shared manager allocates, resumes, and
+ * releases through the plain driver contract.
+ */
+const makeTestCloudSandboxDriver = (pricingFor?: (size: string) => number | null) => {
+  const machines = [
+    { id: "m-standard", label: "Standard M", hourlyUsd: 0.02 },
+    { id: "m-large", label: "Large M", hourlyUsd: 0.2 },
+    { id: "m-nan", label: "Broken rate", hourlyUsd: 0.05 },
+    { id: "m-unpriced", label: "Mystery", hourlyUsd: 0.05 },
+  ];
+  const published = new Map(machines.map((machine) => [machine.id, machine.hourlyUsd]));
+  const states = new Map<string, "ready" | "stopped">();
+  const counters = { created: 0, stopped: 0, resumed: 0, deleted: 0 };
+  const details = (id: string): CloudSandboxDetails => ({
+    sandboxId: id,
+    name: "custom",
+    driverKind: "custom",
+    state: states.get(id) ?? "ready",
+    autoStopDeadline: null,
+    createdAt: "2026-01-01T00:00:00Z",
+  });
+  const missing = new CloudSandboxError({ reason: "not-found", cause: new Error("missing") });
+  const driver: BaseCloudSandboxDriver = {
+    kind: "custom",
+    rootAccess: false,
+    machines,
+    pricing: {
+      hourlyUsd: (size) => (pricingFor ? pricingFor(size) : (published.get(size) ?? null)),
+    },
+    list: () => Effect.succeed([...states.keys()].map(details)),
+    get: (id) => (states.has(id) ? Effect.succeed(details(id)) : Effect.fail(missing)),
+    create: (input) => {
+      counters.created++;
+      const size = input.size ?? "m-standard";
+      if (!machines.some((machine) => machine.id === size))
+        return Effect.fail(
+          new CloudSandboxError({
+            reason: "configuration",
+            cause: new Error(`This provider does not offer ${size}.`),
+          }),
+        );
+      const id = input.requestId ?? input.name;
+      states.set(id, "ready");
+      return Effect.succeed(details(id));
+    },
+    resume: (id) => {
+      counters.resumed++;
+      states.set(id, "ready");
+      return Effect.succeed(details(id));
+    },
+    stop: (id) => {
+      counters.stopped++;
+      states.set(id, "stopped");
+      return Effect.succeed(details(id));
+    },
+    delete: (id) => {
+      counters.deleted++;
+      states.delete(id);
+      return Effect.void;
+    },
+    registerSshKey: () => Effect.die("Transport owns SSH"),
+  };
+  return { driver, counters };
+};
 
 it.effect("preserves resource intent, reuses live transport and keeps source grants stable", () =>
   Effect.gen(function* () {
@@ -1026,5 +1100,84 @@ it.effect("notices a provider stop of a user-disconnected sandbox without reconn
     expect((yield* manager.get(id)).phase).toBe("stopped");
     expect(f.connections()).toBe(connections);
     expect(f.resumes()).toBe(0);
+  }).pipe(Effect.scoped),
+);
+
+it.effect.each([
+  { name: "a non-finite rate", size: "m-nan", pricing: (_size: string) => Number.NaN },
+  { name: "a negative rate", size: "m-standard", pricing: (_size: string) => -0.02 },
+  { name: "a machine without a rate", size: "m-unpriced", pricing: (_size: string) => null },
+  { name: "an unimplemented pricing table", size: "m-standard", pricing: (_size: string) => null },
+])("refuses budgeted admission for %s", ({ size, pricing }) =>
+  Effect.gen(function* () {
+    const { driver } = makeTestCloudSandboxDriver(pricing);
+    const f = fixture(
+      false,
+      Effect.void,
+      { active: false, probe: Effect.void },
+      CloudSandboxDriverFactory.of({
+        create: (kind, options) =>
+          kind === "custom" ? Effect.succeed(driver) : createCloudSandboxDriver(kind, options),
+      }),
+    );
+    f.setDriverKind("custom");
+    f.setBudget(10);
+    const manager = yield* f.manager;
+    const result = yield* manager
+      .provision({
+        operationId: ManagedCloudSandboxResourceId.make("unpriced"),
+        profile: SandboxProfileId.make("fixture"),
+        sandbox: { name: "unpriced", size, autoStopMinutes: 15 },
+      })
+      .pipe(Effect.result);
+    expect(result).toMatchObject({ _tag: "Failure", failure: { reason: "budget" } });
+    expect(f.records.has("unpriced")).toBe(false);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("runs a non-Boat provider through the same allocation and lifecycle rules", () =>
+  Effect.gen(function* () {
+    const { driver, counters } = makeTestCloudSandboxDriver();
+    const f = fixture(
+      false,
+      Effect.void,
+      { active: false, probe: Effect.void },
+      CloudSandboxDriverFactory.of({
+        create: (kind, options) =>
+          kind === "custom" ? Effect.succeed(driver) : createCloudSandboxDriver(kind, options),
+      }),
+    );
+    f.setDriverKind("custom");
+    const manager = yield* f.manager;
+    const id = ManagedCloudSandboxResourceId.make("custom-live");
+    const resource = yield* manager.provision({
+      operationId: id,
+      profile: SandboxProfileId.make("fixture"),
+      sandbox: { name: "custom", size: "m-standard", autoStopMinutes: 15 },
+    });
+    expect(counters.created).toBe(1);
+    expect(resource.connection.driverKind).toBe("custom");
+    expect((yield* manager.get(id)).phase).toBe("connected");
+    yield* manager.execute(id, { _tag: "stop" });
+    expect(counters.stopped).toBe(1);
+    expect((yield* manager.get(id)).phase).toBe("stopped");
+    yield* manager.reconcile;
+    expect((yield* manager.get(id)).phase).toBe("stopped");
+    expect(counters.resumed).toBe(0);
+    yield* manager.execute(id, { _tag: "resume" });
+    expect(counters.resumed).toBe(1);
+    expect((yield* manager.get(id)).phase).toBe("connected");
+    // A machine another provider named is the selected provider's call to refuse.
+    expect(
+      yield* manager
+        .provision({
+          operationId: ManagedCloudSandboxResourceId.make("foreign-machine"),
+          profile: SandboxProfileId.make("fixture"),
+          sandbox: { name: "foreign", size: "small", autoStopMinutes: 15 },
+        })
+        .pipe(Effect.result),
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "provider" } });
+    expect(f.records.has("foreign-machine")).toBe(false);
+    expect(counters.created).toBe(1);
   }).pipe(Effect.scoped),
 );

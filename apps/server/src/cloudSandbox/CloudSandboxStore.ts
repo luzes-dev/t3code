@@ -50,7 +50,7 @@ export class CloudSandboxManagerError extends Schema.TaggedError<CloudSandboxMan
       case "storage":
         return "The managed cloud state could not be saved or read.";
       case "budget":
-        return "The profile's monthly cloud budget is exhausted.";
+        return "The profile's monthly cloud budget refused this operation: the limit is reached, or the cost cannot be confirmed.";
       case "concurrency":
         return "The profile's concurrent sandbox limit is reached.";
     }

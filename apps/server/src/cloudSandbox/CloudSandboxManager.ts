@@ -25,6 +25,7 @@ import { makeConnections } from "./ManagerConnections.ts";
 import { makeControl } from "./ManagerControl.ts";
 import { makeManagerRuntime } from "./ManagerRuntime.ts";
 import { makeReconciler } from "./ManagerReconciler.ts";
+import { cloudSandboxDriverFactoryLayer } from "@t3tools/cloud-sandbox";
 
 export { CloudSandboxManagerError } from "./CloudSandboxStore.ts";
 
@@ -156,4 +157,5 @@ export const layer = Layer.effect(CloudSandboxManager, make).pipe(
   Layer.provide(Store.layer),
   Layer.provide(Transport.layer),
   Layer.provide(Profiles.layer),
+  Layer.provide(cloudSandboxDriverFactoryLayer),
 );

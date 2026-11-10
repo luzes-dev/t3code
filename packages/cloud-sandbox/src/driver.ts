@@ -135,6 +135,12 @@ export interface ResizableSandbox {
 export interface BaseCloudSandboxDriver {
   readonly kind: CloudSandboxDriverKind;
   readonly rootAccess: boolean;
+  /** Machines this provider offers; labels and rates surface in the settings UI. */
+  readonly machines?: readonly {
+    readonly id: string;
+    readonly label: string;
+    readonly hourlyUsd?: number;
+  }[];
   readonly pricing?: {
     readonly hourlyUsd: (size: string) => number | null;
   };
@@ -177,5 +183,15 @@ export function cloudSandboxCapabilities(driver: BaseCloudSandboxDriver) {
     resizeMode: driver.resizing?.mode ?? "none",
     hotResize: driver.resizing?.mode === "hot",
     rootAccess: driver.rootAccess,
+    ...(driver.machines === undefined || driver.machines.length === 0
+      ? {}
+      : { machines: driver.machines.map((machine) => ({ ...machine })) }),
   } satisfies CloudSandboxCapabilities;
 }
+
+/** A machine type the driver does not report, so callers avoid a doomed provider call. */
+export const cloudSandboxSupportsMachine = (
+  driver: BaseCloudSandboxDriver,
+  size: string,
+): boolean =>
+  driver.machines === undefined || driver.machines.some((machine) => machine.id === size);

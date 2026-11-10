@@ -8,6 +8,12 @@ import { CloudSandboxError, type BaseCloudSandboxDriver } from "../../driver.ts"
 
 const decodeSize = Schema.decodeUnknownEffect(BoatSandboxSize);
 const isBoatSandboxSize = Schema.is(BoatSandboxSize);
+const BOAT_SIZE_LABELS: Record<BoatSandboxSize, string> = {
+  small: "Small",
+  default: "Standard",
+  large: "Large",
+  xlarge: "Extra Large",
+};
 const mapError = (cause: BoatApiError) =>
   new CloudSandboxError({
     reason:
@@ -47,6 +53,11 @@ export function createBoatCloudSandboxDriver(client: BoatApiClient): BaseCloudSa
   return {
     kind: "boat",
     rootAccess: true,
+    machines: (Object.keys(BOAT_SANDBOX_HOURLY_USD) as BoatSandboxSize[]).map((id) => ({
+      id,
+      label: BOAT_SIZE_LABELS[id],
+      hourlyUsd: BOAT_SANDBOX_HOURLY_USD[id],
+    })),
     pricing: {
       hourlyUsd: (size) => (isBoatSandboxSize(size) ? BOAT_SANDBOX_HOURLY_USD[size] : null),
     },

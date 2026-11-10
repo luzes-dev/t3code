@@ -4,7 +4,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import { HttpClient } from "effect/http";
-import { CloudSandboxError, createCloudSandboxDriver } from "@t3tools/cloud-sandbox";
+import { CloudSandboxDriverFactory, CloudSandboxError } from "@t3tools/cloud-sandbox";
 import type {
   CloudSandboxProfileError,
   ManagedCloudSandboxResource,
@@ -69,6 +69,7 @@ export const makeManagerRuntime = Effect.fn("CloudSandboxManager.makeRuntime")(f
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const profiles = yield* Profiles.CloudSandboxProfiles;
   const transport = yield* Transport.CloudSandboxTransport;
+  const drivers = yield* CloudSandboxDriverFactory;
   const httpClient = yield* HttpClient.HttpClient;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const controllerEnvironmentId = yield* environment.getEnvironmentId;
@@ -110,10 +111,12 @@ export const makeManagerRuntime = Effect.fn("CloudSandboxManager.makeRuntime")(f
     record: Store.CloudSandboxRecord,
   ) {
     const { apiKey } = yield* resolveProfile(record.profileId);
-    return yield* createCloudSandboxDriver(record.driverKind, {
-      apiKey,
-      httpClient,
-    }).pipe(Effect.mapError(toError));
+    return yield* drivers
+      .create(record.driverKind, {
+        apiKey,
+        httpClient,
+      })
+      .pipe(Effect.mapError(toError));
   });
 
   const requireSandbox = (record: Store.CloudSandboxRecord) =>
@@ -133,6 +136,7 @@ export const makeManagerRuntime = Effect.fn("CloudSandboxManager.makeRuntime")(f
     secrets,
     profiles,
     transport,
+    drivers,
     httpClient,
     controllerEnvironmentId,
     scope,

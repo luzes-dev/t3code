@@ -1,7 +1,7 @@
 import {
   DEFAULT_MAX_CONCURRENT_SANDBOXES,
-  type BoatSandboxSize,
   type CloudSandboxDriverKind,
+  type SandboxMachineType,
 } from "@t3tools/contracts";
 
 export type EnvironmentType = "remote" | "ssh" | "cloudSandbox";
@@ -34,7 +34,7 @@ export interface CloudSandboxDraft {
   readonly apiKey: string;
   /** The server-side settings profile resolved during access; null until then. */
   readonly profileId: string | null;
-  readonly defaultSize: BoatSandboxSize;
+  readonly defaultSize: SandboxMachineType;
   readonly autoStopMinutes: number;
   /** Typed dollars; empty means no monthly limit. */
   readonly monthlyBudgetUsd: string;

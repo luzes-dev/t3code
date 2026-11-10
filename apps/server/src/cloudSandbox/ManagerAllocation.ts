@@ -3,9 +3,8 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { createCloudSandboxDriver } from "@t3tools/cloud-sandbox";
+import { cloudSandboxSupportsMachine } from "@t3tools/cloud-sandbox";
 import {
-  BoatSandboxSize,
   ManagedCloudSandboxProvisionInput,
   type CloudSandboxProfile,
   type ManagedCloudSandboxForkInput,
@@ -20,7 +19,6 @@ import {
 } from "./ManagerRuntime.ts";
 import type { ManagerConnections } from "./ManagerConnections.ts";
 
-const decodeSize = Schema.decodeUnknownEffect(BoatSandboxSize);
 export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnections) => {
   const {
     store,
@@ -35,6 +33,7 @@ export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnectio
     resolveProfile,
     driverFor,
     stopWorker,
+    drivers,
   } = rt;
   const { connectUnlocked, connectRecord } = connections;
   const reserveAllocation = Effect.fn("CloudSandboxManager.reserveAllocation")(function* (
@@ -43,6 +42,20 @@ export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnectio
     autoStopMinutes: number,
     record: Store.CloudSandboxRecord,
   ) {
+    const { apiKey } = yield* resolveProfile(profile.profileId);
+    const driver = yield* drivers
+      .create(profile.driverKind, {
+        apiKey,
+        httpClient,
+      })
+      .pipe(Effect.mapError(toError));
+    // The selected provider owns machine validation; a reported list catches
+    // invalid sizes before any save or snapshot capture.
+    if (!cloudSandboxSupportsMachine(driver, size ?? "default"))
+      return yield* new Store.CloudSandboxManagerError({
+        reason: "provider",
+        cause: new Error(`The provider does not offer this machine type (${size ?? "default"}).`),
+      });
     yield* locks.withLock(
       `profile:${profile.profileId}`,
       Effect.gen(function* () {
@@ -56,33 +69,55 @@ export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnectio
         if (running.length >= profile.maxConcurrentSandboxes)
           return yield* new Store.CloudSandboxManagerError({ reason: "concurrency" });
         if (profile.monthlyBudgetUsd !== null) {
-          const { apiKey } = yield* resolveProfile(profile.profileId);
-          const driver = yield* createCloudSandboxDriver(profile.driverKind, {
-            apiKey,
-            httpClient,
-          }).pipe(Effect.mapError(toError));
-          const reservationUsd = (requestSize: string | undefined, minutes: number) =>
-            ((driver.pricing?.hourlyUsd(requestSize ?? "default") ?? 0) * minutes) / 60;
-          const reservationOf = (candidate: Store.CloudSandboxRecord) =>
-            reservationUsd(candidate.selection.size, candidate.selection.autoStopMinutes);
+          // An unpriced machine counts as unknown cost, never free: admission is refused.
+          const rateUsdPerHour = (requestSize: string | undefined): number | null => {
+            const rate = driver.pricing?.hourlyUsd(requestSize ?? "default");
+            return rate !== null && rate !== undefined && Number.isFinite(rate) && rate >= 0
+              ? rate
+              : null;
+          };
+          const reservationUsd = (
+            requestSize: string | undefined,
+            minutes: number,
+          ): number | null => {
+            const rate = rateUsdPerHour(requestSize);
+            return rate === null ? null : (rate * minutes) / 60;
+          };
           const spend = yield* profiles
             .spendOf(profile.profileId)
             .pipe(Effect.mapError(toManagerError));
           if (spend !== null && !Number.isFinite(spend.usd))
             return yield* new Store.CloudSandboxManagerError({ reason: "budget" });
+          const requestedUsd = reservationUsd(size, autoStopMinutes);
+          if (requestedUsd === null)
+            return yield* new Store.CloudSandboxManagerError({
+              reason: "budget",
+              cause: new Error(
+                `The provider does not report a price for this machine (${size ?? "default"}).`,
+              ),
+            });
           let committed = spend?.usd ?? 0;
           for (const candidate of live) {
-            const reservation = reservationOf(candidate);
-            committed +=
+            const fallback = reservationUsd(
+              candidate.selection.size,
+              candidate.selection.autoStopMinutes,
+            );
+            const knownUsd =
               candidate.sandboxId !== null && driver.usage
                 ? yield* driver.usage.getUsage(candidate.sandboxId).pipe(
                     Effect.map((usage) => usage.listValueUsd),
-                    Effect.orElseSucceed(() => reservation),
+                    Effect.orElseSucceed(() => fallback),
                   )
-                : reservation;
+                : fallback;
+            if (knownUsd === null || !Number.isFinite(knownUsd))
+              return yield* new Store.CloudSandboxManagerError({
+                reason: "budget",
+                cause: new Error("The running cost of an existing sandbox cannot be confirmed."),
+              });
+            committed += knownUsd;
           }
-          const total = committed + reservationUsd(size, autoStopMinutes);
-          if (!Number.isFinite(total) || total > profile.monthlyBudgetUsd)
+          const total = committed + requestedUsd;
+          if (total > profile.monthlyBudgetUsd)
             return yield* new Store.CloudSandboxManagerError({ reason: "budget" });
         }
         yield* store.save(record);
@@ -190,7 +225,6 @@ export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnectio
         return yield* new Store.CloudSandboxManagerError({ reason: "provider" });
       const name = `t3-${input.operationId}`;
       const size = input.size ?? "small";
-      const parsedSize = yield* decodeSize(size).pipe(Effect.mapError(toError));
       const autoStopMinutes = input.autoStopMinutes ?? 15;
       const record: Store.CloudSandboxRecord = Option.isSome(existing)
         ? { ...existing.value, lifecycle: "allocating" }
@@ -210,7 +244,7 @@ export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnectio
               requestId: input.operationId,
               template: name,
               name: input.name,
-              size: parsedSize,
+              size,
               autoStopMinutes,
             },
             snapshotName: name,
@@ -220,7 +254,7 @@ export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnectio
             recordingIds: [],
             enableLinkedEnvironments: input.enableLinkedEnvironments ?? false,
           };
-      yield* reserveAllocation(profile, parsedSize, autoStopMinutes, record);
+      yield* reserveAllocation(profile, size, autoStopMinutes, record);
       return yield* connectRecord(record, true);
     });
   });
@@ -259,9 +293,12 @@ export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnectio
               const createdAt = details.createdAt
                 ? DateTime.make(details.createdAt)
                 : Option.none();
-              if (Option.isNone(createdAt)) return 0;
+              if (Option.isNone(createdAt)) return null;
+              const rate = details.hourlyRateUsd;
+              if (rate === null || rate === undefined || !Number.isFinite(rate) || rate < 0)
+                return null;
               const elapsedMs = Math.max(0, now - DateTime.toEpochMillis(createdAt.value));
-              return ((details.hourlyRateUsd ?? 0) * elapsedMs) / 3_600_000;
+              return (rate * elapsedMs) / 3_600_000;
             },
           );
           if (record.finalSpendUsd === null && record.sandboxId !== null) {

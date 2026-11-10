@@ -38,6 +38,12 @@ const profileStatus = (overrides: {
     monthlyBudgetUsd: overrides.monthlyBudgetUsd ?? null,
     maxConcurrentSandboxes: overrides.maxConcurrentSandboxes ?? 3,
   },
+  machines: [
+    { id: "small", label: "Small", hourlyUsd: 0.018 },
+    { id: "default", label: "Standard", hourlyUsd: 0.036 },
+    { id: "large", label: "Large", hourlyUsd: 0.072 },
+    { id: "xlarge", label: "Extra Large", hourlyUsd: 0.144 },
+  ],
   spend:
     overrides.spendUsd === null || overrides.spendUsd === undefined
       ? null

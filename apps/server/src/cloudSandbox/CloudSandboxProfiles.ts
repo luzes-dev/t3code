@@ -1,4 +1,8 @@
-import { cloudSandboxCapabilities, createCloudSandboxDriver } from "@t3tools/cloud-sandbox";
+import {
+  CloudSandboxDriverFactory,
+  cloudSandboxCapabilities,
+  cloudSandboxDriverFactoryLayer,
+} from "@t3tools/cloud-sandbox";
 import {
   CloudSandboxProfile,
   CloudSandboxProfileError,
@@ -89,15 +93,26 @@ const runningCount = (
     (resource) => resource.profileId === profileId && Store.isRunningRecord(resource),
   ).length;
 
+/** Static driver metadata; no provider call is made for machine labels and rates. */
+const machinesOf = Effect.fn("CloudSandboxProfiles.machines")(function* (
+  drivers: CloudSandboxDriverFactory["Service"],
+  driverKind: CloudSandboxProfile["driverKind"],
+  httpClient: HttpClient.HttpClient,
+) {
+  const driver = yield* drivers.create(driverKind, { apiKey: "", httpClient }).pipe(Effect.option);
+  return driver._tag === "Some" ? (cloudSandboxCapabilities(driver.value).machines ?? []) : [];
+});
+
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const httpClient = yield* HttpClient.HttpClient;
   const resources = yield* Store.CloudSandboxStore;
+  const drivers = yield* CloudSandboxDriverFactory;
   const writes = yield* Semaphore.make(1);
   const testCredential = Effect.fn("CloudSandboxProfiles.testCredential")(
     function* (driverKind: CloudSandboxProfile["driverKind"], apiKey: string) {
-      const driver = yield* createCloudSandboxDriver(driverKind, { apiKey, httpClient });
+      const driver = yield* drivers.create(driverKind, { apiKey, httpClient });
       yield* driver.list();
       return cloudSandboxCapabilities(driver);
     },
@@ -207,24 +222,32 @@ const make = Effect.gen(function* () {
       const payloads = yield* Effect.forEach(rows, (row) => decode(row.payload_json));
       const sandboxes = yield* resources.list;
       const period = yield* currentPeriod;
-      return payloads.flatMap((payload) => {
-        const spend =
-          payload.spend === undefined || payload.spend.period !== period
-            ? null
-            : {
-                period: payload.spend.period,
-                usd: payload.spend.usd,
-                running: runningCount(payload.profile.profileId, sandboxes),
-              };
-        return [{ profile: payload.profile, spend }];
-      });
+      return yield* Effect.forEach(payloads, (payload) =>
+        Effect.gen(function* () {
+          const spend =
+            payload.spend === undefined || payload.spend.period !== period
+              ? null
+              : {
+                  period: payload.spend.period,
+                  usd: payload.spend.usd,
+                  running: runningCount(payload.profile.profileId, sandboxes),
+                };
+          const machines = yield* machinesOf(drivers, payload.profile.driverKind, httpClient);
+          return { profile: payload.profile, spend, ...(machines.length > 0 ? { machines } : {}) };
+        }),
+      );
     }).pipe(Effect.mapError(storage), Effect.withSpan("CloudSandboxProfiles.list")),
     save,
     saveStatus: Effect.fn("CloudSandboxProfiles.saveStatus")(function* (
       input: CloudSandboxProfileSaveInput,
     ) {
       const profile = yield* save(input);
-      return { profile, spend: yield* spendOf(profile.profileId) };
+      const machines = yield* machinesOf(drivers, profile.driverKind, httpClient);
+      return {
+        profile,
+        spend: yield* spendOf(profile.profileId),
+        ...(machines.length > 0 ? { machines } : {}),
+      };
     }),
     remove: Effect.fn("CloudSandboxProfiles.remove")(function* (profileId: SandboxProfileId) {
       yield* sql.withTransaction(
@@ -266,4 +289,7 @@ const make = Effect.gen(function* () {
     }),
   });
 });
-export const layer = Layer.effect(CloudSandboxProfiles, make).pipe(Layer.provide(Store.layer));
+export const layer = Layer.effect(CloudSandboxProfiles, make).pipe(
+  Layer.provide(Store.layer),
+  Layer.provide(cloudSandboxDriverFactoryLayer),
+);

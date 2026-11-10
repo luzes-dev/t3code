@@ -1,5 +1,4 @@
 import {
-  type BoatSandboxSize,
   type CloudSandboxProfileStatus,
   type EnvironmentId,
   type ManagedCloudSandboxControlOperation,
@@ -25,18 +24,12 @@ import {
   type AtomCommandResult,
 } from "./runtime.ts";
 
-export const BOAT_SIZE_LABELS: Record<BoatSandboxSize, string> = {
-  small: "Small",
-  default: "Standard",
-  large: "Large",
-  xlarge: "Extra Large",
-};
-
 const CLOUD_SANDBOX_PHASE_LABELS: Record<ManagedCloudSandboxResource["phase"], string> = {
   allocating: "Starting",
   connecting: "Connecting",
   connected: "Running",
-  disconnected: "Disconnected",
+  // Disconnect only stops routing; the VM keeps billing until something stops it.
+  disconnected: "Disconnected, billed until stop",
   stopped: "Stopped",
   deleting: "Deleting",
   deleted: "Deleted",
@@ -45,12 +38,16 @@ const CLOUD_SANDBOX_PHASE_LABELS: Record<ManagedCloudSandboxResource["phase"], s
 
 const usd = (amount: number) => (amount > 0 && amount < 0.01 ? "<$0.01" : `$${amount.toFixed(2)}`);
 
+/** Labels come from the provider's reported machines; unknown ids show as typed. */
+const machineLabel = (machines: CloudSandboxProfileStatus["machines"], id: string): string =>
+  machines?.find((machine) => machine.id === id)?.label ?? id.charAt(0).toUpperCase() + id.slice(1);
+
 export function describeCloudSandboxProfile(
-  { profile, spend }: CloudSandboxProfileStatus,
+  { profile, spend, machines }: CloudSandboxProfileStatus,
   running: number,
 ): string {
   const size =
-    profile.defaultSize === null ? "No default size" : BOAT_SIZE_LABELS[profile.defaultSize];
+    profile.defaultSize === null ? "No default size" : machineLabel(machines, profile.defaultSize);
   const autoStop =
     profile.autoStopMinutes % 60 === 0
       ? `${profile.autoStopMinutes / 60} h`

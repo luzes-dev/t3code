@@ -103,6 +103,12 @@ const boatProfile = {
     maxConcurrentSandboxes: 3,
   },
   spend: { period: "2026-11", usd: 4.5, running: 1 },
+  machines: [
+    { id: "small", label: "Small", hourlyUsd: 0.018 },
+    { id: "default", label: "Standard", hourlyUsd: 0.036 },
+    { id: "large", label: "Large", hourlyUsd: 0.072 },
+    { id: "xlarge", label: "Extra Large", hourlyUsd: 0.144 },
+  ],
 };
 
 const connectedSandbox = {

@@ -31,6 +31,7 @@ import {
   cloudSandboxSourceProbe,
   make,
 } from "./CloudSandboxTransport.ts";
+import { cloudSandboxDriverFactoryLayer } from "@t3tools/cloud-sandbox";
 
 it("passes the source health probe through SSH's remote shell without losing curl arguments", () => {
   const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "cloud-probe-"));
@@ -247,6 +248,7 @@ it.effect("returns an unconsumed peer credential after exchanging the transport 
         Layer.mergeAll(
           manager,
           SshAuth.SshPasswordPrompt.disabledLayer,
+          cloudSandboxDriverFactoryLayer,
           Layer.mock(NetService.NetService)({}),
           Layer.succeed(HttpClient.HttpClient, client),
           Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -325,6 +327,7 @@ it.effect("rejects injected or malformed SSH host keys before writing known_host
         Layer.mergeAll(
           manager,
           SshAuth.SshPasswordPrompt.disabledLayer,
+          cloudSandboxDriverFactoryLayer,
           Layer.mock(NetService.NetService)({}),
           Layer.succeed(HttpClient.HttpClient, client),
           Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),

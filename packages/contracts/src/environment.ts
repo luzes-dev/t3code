@@ -257,6 +257,22 @@ export const BOAT_SANDBOX_HOURLY_USD = {
   xlarge: 0.144,
 } as const satisfies Record<BoatSandboxSize, number>;
 
+/**
+ * A provider machine type. Only the selected provider's driver knows which
+ * values are valid, so shared contracts treat it as opaque.
+ */
+export const SandboxMachineType = TrimmedNonEmptyString.check(
+  Schema.isPattern(/^[a-zA-Z0-9._-]{1,64}$/u),
+);
+export type SandboxMachineType = typeof SandboxMachineType.Type;
+
+/** A machine a driver reports to the settings UI; rates are dollars per hour. */
+export const CloudSandboxMachine = Schema.Struct({
+  id: SandboxMachineType,
+  label: TrimmedNonEmptyString,
+  hourlyUsd: Schema.optionalKey(Schema.Number),
+});
+
 export const DEFAULT_MAX_CONCURRENT_SANDBOXES = 3;
 
 export const CloudSandboxState = Schema.Literals([
@@ -316,7 +332,7 @@ export const CloudSandboxProfile = Schema.Struct({
   name: TrimmedNonEmptyString,
   driverKind: CloudSandboxDriverKind,
   apiKeySet: Schema.Boolean,
-  defaultSize: Schema.NullOr(BoatSandboxSize),
+  defaultSize: Schema.NullOr(SandboxMachineType),
   autoStopMinutes: SandboxAutoStopMinutes,
   /** Boot template saved snapshot; null creates each sandbox from scratch. */
   template: Schema.NullOr(TrimmedNonEmptyString),
@@ -331,7 +347,7 @@ export const CloudSandboxProfileSaveInput = Schema.Struct({
   name: TrimmedNonEmptyString,
   driverKind: CloudSandboxDriverKind,
   apiKey: Schema.optionalKey(TrimmedNonEmptyString),
-  defaultSize: Schema.NullOr(BoatSandboxSize),
+  defaultSize: Schema.NullOr(SandboxMachineType),
   autoStopMinutes: SandboxAutoStopMinutes,
   template: Schema.NullOr(TrimmedNonEmptyString),
   monthlyBudgetUsd: Schema.NullOr(Schema.Number.check(Schema.isGreaterThan(0))),
@@ -358,6 +374,8 @@ export type CloudSandboxProfileSpend = typeof CloudSandboxProfileSpend.Type;
 export const CloudSandboxProfileStatus = Schema.Struct({
   profile: CloudSandboxProfile,
   spend: Schema.NullOr(CloudSandboxProfileSpend),
+  /** Machines the profile's provider reports, for the settings UI. */
+  machines: Schema.optionalKey(Schema.Array(CloudSandboxMachine)),
 });
 export type CloudSandboxProfileStatus = typeof CloudSandboxProfileStatus.Type;
 
@@ -373,6 +391,8 @@ export const CloudSandboxCapabilities = Schema.Struct({
   protectedPortHosting: Schema.optionalKey(Schema.Boolean),
   hotResize: Schema.Boolean,
   rootAccess: Schema.Boolean,
+  /** Machines the provider offers; absent when the driver reports none. */
+  machines: Schema.optionalKey(Schema.Array(CloudSandboxMachine)),
 });
 export type CloudSandboxCapabilities = typeof CloudSandboxCapabilities.Type;
 
@@ -463,7 +483,7 @@ export const CloudSandboxSelection = Schema.Struct({
   requestId: Schema.optionalKey(Schema.String),
   template: Schema.optionalKey(Schema.String),
   name: TrimmedNonEmptyString,
-  size: BoatSandboxSize,
+  size: SandboxMachineType,
   autoStopMinutes: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 43200 })),
 });
 export type CloudSandboxSelection = typeof CloudSandboxSelection.Type;

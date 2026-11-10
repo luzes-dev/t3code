@@ -2,6 +2,10 @@ import { EnvironmentId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import { HttpClient, HttpClientResponse } from "effect/http";
+import {
+  CloudSandboxDriverFactory,
+  defaultCloudSandboxDriverFactory,
+} from "@t3tools/cloud-sandbox";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as Profiles from "./CloudSandboxProfiles.ts";
@@ -16,6 +20,7 @@ export const fixture = (
     active: false,
     probe: Effect.void,
   },
+  driverFactory?: CloudSandboxDriverFactory["Service"],
 ) => {
   let responseFor: (url: string, method: string) => Response | undefined = () => undefined;
   let beforeRequest: (url: string) => Effect.Effect<void> = () => Effect.void;
@@ -36,6 +41,7 @@ export const fixture = (
   let monthlyBudgetUsd: number | null = null;
   let maxConcurrentSandboxes = 100;
   let apiKey = "key";
+  let driverKind = "boat" as "boat" | "custom";
   const authorizations: (string | undefined)[] = [];
   const connectionInputs: Transport.CloudSandboxTransportInput[] = [];
   const profiles = Profiles.CloudSandboxProfiles.of({
@@ -48,7 +54,7 @@ export const fixture = (
         profile: {
           profileId,
           name: "Fixture profile",
-          driverKind: "boat",
+          driverKind,
           apiKeySet: true,
           defaultSize: null,
           autoStopMinutes: 15,
@@ -182,6 +188,10 @@ export const fixture = (
     );
   });
   const manager = make.pipe(
+    Effect.provideService(
+      CloudSandboxDriverFactory,
+      driverFactory ?? defaultCloudSandboxDriverFactory,
+    ),
     Effect.provideService(Store.CloudSandboxStore, store),
     Effect.provideService(Profiles.CloudSandboxProfiles, profiles),
     Effect.provideService(ServerSecretStore.ServerSecretStore, secrets),
@@ -206,6 +216,9 @@ export const fixture = (
     },
     setApiKey: (value: string) => {
       apiKey = value;
+    },
+    setDriverKind: (value: "boat" | "custom") => {
+      driverKind = value;
     },
     authorizations: (): readonly (string | undefined)[] => authorizations,
     setSpend: (profileId: string, usd: number) => {

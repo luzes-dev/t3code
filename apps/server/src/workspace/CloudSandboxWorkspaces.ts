@@ -1,6 +1,5 @@
 import * as ServerConfig from "../config.ts";
 import {
-  BoatSandboxSize,
   EnvironmentId,
   ManagedCloudSandboxResourceId,
   MANAGED_CLOUD_SOURCE_PORT,
@@ -53,7 +52,6 @@ const Record = Schema.Struct({
 const SetupStatus = Schema.Literals(["started", "completed"]);
 const decodeSetupStatus = Schema.decodeUnknownEffect(SetupStatus);
 const decodeResourceId = Schema.decodeEffect(ManagedCloudSandboxResourceId);
-const decodeSize = Schema.decodeUnknownEffect(BoatSandboxSize);
 const isWorktreeFailure = Schema.is(WorktreeMcpFailure);
 const decode = Schema.decodeUnknownEffect(Schema.fromJsonString(Record));
 const encode = Schema.encodeEffect(Schema.fromJsonString(Record));
@@ -302,9 +300,6 @@ export const make = Effect.gen(function* () {
             ? "No sandbox profile is configured. Add one in Settings → Environments → Add environment."
             : "The requested sandbox profile does not exist.",
         );
-      const size = yield* decodeSize(input.size ?? profile.value.defaultSize ?? "default").pipe(
-        Effect.mapError(() => invalid("Unsupported sandbox size.")),
-      );
       const route = yield* manager.provision({
         operationId: decoded,
         profile: profile.value.profileId,
@@ -312,7 +307,7 @@ export const make = Effect.gen(function* () {
           requestId: workspaceId,
           ...(profile.value.template === null ? {} : { template: profile.value.template }),
           name: input.name,
-          size,
+          size: input.size ?? profile.value.defaultSize ?? "default",
           autoStopMinutes: input.autoStopMinutes ?? profile.value.autoStopMinutes,
         },
         enableLinkedEnvironments: true,
