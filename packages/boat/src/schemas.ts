@@ -15,6 +15,8 @@ export const CreateSandboxInput = Schema.Struct({
   size: Schema.optionalKey(BoatSandboxSize),
   autoStopMinutes: Schema.optionalKey(Schema.Number),
   template: Schema.optionalKey(Schema.String),
+  /** Documented request field; without it the sandbox inherits account envs. */
+  noEnv: Schema.optionalKey(Schema.Boolean),
 });
 export type CreateSandboxInput = typeof CreateSandboxInput.Type;
 export interface DesktopUrlInput {

@@ -149,6 +149,18 @@ describe("BoatApiClient", () => {
     }),
   );
 
+  it.effect("sets noEnv on the create body only when exclusion was requested", () =>
+    Effect.gen(function* () {
+      const withNoEnv = setup([{ body: details, status: 202 }, { body: details }]);
+      yield* withNoEnv.client.createSandbox({ name: "dev", noEnv: true });
+      expect(withNoEnv.requests[0]?.body).toMatchObject({ noEnv: true });
+
+      const withoutNoEnv = setup([{ body: details, status: 202 }, { body: details }]);
+      yield* withoutNoEnv.client.createSandbox({ name: "dev" });
+      expect(withoutNoEnv.requests[0]?.body).not.toHaveProperty("noEnv");
+    }),
+  );
+
   it.effect("resumes and stops through action endpoints, then reads canonical state", () =>
     Effect.gen(function* () {
       const { client, requests } = setup([

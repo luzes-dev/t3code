@@ -74,6 +74,9 @@ export const makeManagerRuntime = Effect.fn("CloudSandboxManager.makeRuntime")(f
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const controllerEnvironmentId = yield* environment.getEnvironmentId;
   const scope = yield* Scope.Scope;
+  // Allocation and lifecycle locks are process-local; one controller server may
+  // share a provider profile. A second controller server against the same
+  // profile would not see these locks or this budget ledger.
   const locks = yield* KeyedLock.make<string>();
   const routes = new Map<string, ManagedCloudSandboxRoute>();
   const healthFailures = new Map<string, number>();

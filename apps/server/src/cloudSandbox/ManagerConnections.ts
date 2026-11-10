@@ -107,6 +107,38 @@ export const makeConnections = (rt: ManagerRuntime) => {
     return Hex.encode(bytes);
   });
 
+  /**
+   * Finds this record's VM by the durable name every managed create gives the
+   * provider, so a lost create response or a crashed controller re-adopts the
+   * original VM instead of allocating a second one. Adoption requires the exact
+   * `t3-<operationId>` name, which this controller alone mints.
+   */
+  const adoptOrphanSandbox = Effect.fn("CloudSandboxManager.adoptOrphan")(function* (
+    record: Store.CloudSandboxRecord,
+    driver: BaseCloudSandboxDriver,
+  ) {
+    const expectedName = `t3-${record.resourceId}`;
+    const listed = yield* driver.list().pipe(Effect.option);
+    if (Option.isNone(listed)) return Option.none();
+    const match = listed.value.find((sandbox) => sandbox.name === expectedName);
+    return match === undefined ? Option.none() : Option.some(match.sandboxId);
+  });
+
+  /** Reconciler entry: adopt a crashed allocation's orphan or leave a failed record. */
+  const recoverUnallocated = Effect.fn("CloudSandboxManager.recoverUnallocated")(function* (
+    record: Store.CloudSandboxRecord,
+  ) {
+    const driver = yield* driverFor(record);
+    const orphan = yield* adoptOrphanSandbox(record, driver);
+    if (Option.isNone(orphan)) {
+      yield* store.save({ ...record, lifecycle: "failed" });
+      return;
+    }
+    const recovered = { ...record, sandboxId: orphan.value };
+    yield* store.save(recovered);
+    yield* connectRecord(recovered, false);
+  });
+
   const connectRecordUnchecked = Effect.fn("CloudSandboxManager.connectRecord")(function* (
     initial: Store.CloudSandboxRecord,
     allowResume: boolean,
@@ -117,8 +149,21 @@ export const makeConnections = (rt: ManagerRuntime) => {
     const driver = yield* driverFor(record);
     if (record.sandboxId === null) {
       record = yield* prepareForkSnapshot(record, driver);
-      const sandbox = yield* driver.create({ ...record.selection, requestId: record.resourceId });
-      record = { ...record, sandboxId: sandbox.sandboxId };
+      // The provider cannot be queried by the create's idempotency key, so every
+      // managed VM carries its durable operation id in its provider name and a
+      // lost create response is recovered by that name instead of a new VM.
+      const orphan = yield* adoptOrphanSandbox(record, driver);
+      if (Option.isSome(orphan)) {
+        record = { ...record, sandboxId: orphan.value };
+      } else {
+        const sandbox = yield* driver.create({
+          ...record.selection,
+          requestId: record.resourceId,
+          noEnv: true,
+          name: `t3-${record.resourceId}`,
+        });
+        record = { ...record, sandboxId: sandbox.sandboxId };
+      }
       yield* store.save(record);
     }
     const sandboxId = yield* requireSandbox(record);
@@ -294,6 +339,7 @@ export const makeConnections = (rt: ManagerRuntime) => {
     disconnectUnlocked,
     disconnect,
     route,
+    recoverUnallocated,
   };
 };
 

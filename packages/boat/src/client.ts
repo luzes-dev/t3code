@@ -282,6 +282,7 @@ export function createBoatApiClient(options: BoatApiClientOptions): BoatApiClien
             type: input.size ?? "default",
             ttlSeconds: Math.max(1, Math.round((input.autoStopMinutes ?? 60) * 60)),
             ...(input.template ? { from: input.template } : {}),
+            ...(input.noEnv === true ? { noEnv: true } : {}),
           }),
         ),
       );

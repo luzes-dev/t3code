@@ -3,6 +3,7 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
+import * as Context from "effect/Context";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -285,6 +286,152 @@ it.effect("returns an unconsumed peer credential after exchanging the transport 
     ),
     Effect.scoped,
   ),
+);
+
+it.effect("pins the first host key and refuses a changed key until the resource is dropped", () =>
+  Effect.gen(function* () {
+    const config = Context.get(
+      yield* Layer.build(
+        ServerConfig.layerTest(process.cwd(), { prefix: "cloud-transport-pins-" }),
+      ),
+      ServerConfig.ServerConfig,
+    );
+    const fs = yield* FileSystem.FileSystem;
+    const directory = `${config.baseDir}/cloud-sandbox-ssh`;
+    yield* fs.makeDirectory(directory, { recursive: true });
+    yield* fs.writeFileString(`${directory}/id_ed25519`, "fixture-private-key");
+    yield* fs.writeFileString(`${directory}/id_ed25519.pub`, "ssh-ed25519 fixture-public-key");
+    yield* fs.writeFileString(
+      config.serverRuntimeStatePath,
+      JSON.stringify({
+        version: 1,
+        pid: 1,
+        port: 13773,
+        origin: "http://127.0.0.1:13773",
+        startedAt: "2026-01-01T00:00:00Z",
+      }),
+    );
+    const manager = Layer.mock(SshEnvironmentManager)({
+      ensureEnvironment: (target) =>
+        Effect.sync(() => ({
+          target,
+          pairingToken: "pairing-pin",
+          httpBaseUrl: "http://child.test",
+          wsBaseUrl: "ws://child.test/ws",
+        })),
+      releaseEnvironment: () => Effect.void,
+    });
+    let hostKey = "ssh-ed25519 firstPin AAAA";
+    let issued = 0;
+    const client = HttpClient.make((request) =>
+      Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          request.url.endsWith("/oauth/token")
+            ? Response.json({
+                access_token: `transport-${++issued}`,
+                issued_token_type: "urn:ietf:params:oauth:token-type:access_token",
+                token_type: "Bearer",
+                expires_in: 3600,
+                scope: "orchestration:read orchestration:operate",
+              })
+            : request.url.endsWith("/.well-known/t3/environment")
+              ? Response.json({
+                  environmentId: EnvironmentId.make("child"),
+                  label: "Child",
+                  platform: { os: "linux", arch: "x64" },
+                  serverVersion: "0.0.0-test",
+                  capabilities: {
+                    repositoryIdentity: true,
+                    mcpModeLimitHeader: true,
+                    linkFence: true,
+                  },
+                } satisfies ExecutionEnvironmentDescriptor)
+              : request.url.endsWith("/sshkey")
+                ? Response.json({
+                    machineIp: "192.0.2.1",
+                    sshEndpoint: null,
+                    sshUser: "root",
+                    hostKey,
+                  })
+                : Response.json({
+                    ok: true,
+                    sandbox: { id: "bx_23456789", name: "test", state: "ready" },
+                  }),
+        ),
+      ),
+    );
+    const spawner = ChildProcessSpawner.make((command) => {
+      if (command._tag !== "StandardCommand") return Effect.die("Only standard commands expected");
+      return Effect.succeed(
+        ChildProcessSpawner.makeHandle({
+          pid: ChildProcessSpawner.ProcessId(1),
+          exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+          isRunning: Effect.succeed(true),
+          kill: () => Effect.void,
+          stdin: Sink.drain,
+          stdout: Stream.empty,
+          stderr: Stream.empty,
+          all: Stream.empty,
+          getInputFd: () => Sink.drain,
+          getOutputFd: () => Stream.empty,
+          unref: Effect.succeed(Effect.void),
+        }),
+      );
+    });
+    const layers = Layer.mergeAll(
+      manager,
+      SshAuth.SshPasswordPrompt.disabledLayer,
+      cloudSandboxDriverFactoryLayer,
+      Layer.mock(NetService.NetService)({}),
+      Layer.succeed(HttpClient.HttpClient, client),
+      Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      Layer.succeed(ServerConfig.ServerConfig, config),
+    );
+    const connectInput = {
+      resourceId: "pinned",
+      driverKind: "boat" as const,
+      apiKey: "fixture",
+      sandboxId: "bx_23456789",
+      parentSandboxId: null,
+      expectedEnvironmentId: null,
+      allowResume: true,
+      enableLinkedEnvironments: false,
+      context: {
+        resourceId: ManagedCloudSandboxResourceId.make("pinned"),
+        controllerEnvironmentId: EnvironmentId.make("controller"),
+        controllerBaseUrl: "http://127.0.0.1:47773",
+        grantToken: "fixture",
+      },
+    };
+    const first = yield* make.pipe(Effect.provide(layers));
+
+    // First connect pins; a reconnect with the same key still passes.
+    yield* first.connect(connectInput);
+    yield* first.connect(connectInput);
+
+    // A changed key for the same resource fails the connect.
+    hostKey = "ssh-ed25519 rotated BBBB";
+    const refused = yield* first.connect(connectInput).pipe(Effect.result);
+    expect(refused._tag).toBe("Failure");
+    if (refused._tag === "Failure")
+      expect(
+        String((refused.failure as { cause?: { message?: string } }).cause?.message),
+      ).toContain("host key changed");
+
+    // The pin survives a restart: a fresh transport instance refuses too.
+    const restarted = yield* make.pipe(Effect.provide(layers));
+    const refusedAcrossRestart = yield* restarted.connect(connectInput).pipe(Effect.result);
+    expect(refusedAcrossRestart._tag).toBe("Failure");
+
+    // Deleting the resource forgets the pin, so a replacement bootstraps anew
+    // and the first connect after it re-pins the replacement's key.
+    yield* restarted.forgetHostKey("pinned");
+    yield* restarted.connect(connectInput);
+    expect(JSON.parse(yield* fs.readFileString(`${directory}/host-pins.json`))).toMatchObject({
+      pinned: { hostKey: "ssh-ed25519 rotated BBBB" },
+    });
+  }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)), Effect.scoped),
 );
 
 it.effect("rejects injected or malformed SSH host keys before writing known_hosts", () =>

@@ -342,6 +342,9 @@ export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnectio
               .pipe(Effect.mapError(toManagerError));
           yield* store.save({ ...record, lifecycle: "deleted", snapshotName: null });
           yield* secrets.remove(`cloud-source-${id}`).pipe(Effect.mapError(toError));
+          // The VM and its identity are gone, so its SSH host-key pin may go too
+          // and a correctly provisioned replacement can bootstrap anew.
+          if (record.sandboxId !== null) yield* transport.forgetHostKey(id);
         }),
       )
       .pipe(Effect.mapError(toError));

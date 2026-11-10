@@ -36,6 +36,7 @@ export const fixture = (
   let healthChecks = 0;
   let extensions = 0;
   const extensionTtls: number[] = [];
+  const bodies: (readonly [method: string, url: string, body: unknown])[] = [];
   let state: "ready" | "stopped" = "ready";
   let healthy = true;
   let monthlyBudgetUsd: number | null = null;
@@ -145,23 +146,27 @@ export const fixture = (
       }),
     withConnection: () => Effect.die("not used"),
     pairingToken: () => Effect.succeed("fresh-peer-token"),
+    forgetHostKey: () => Effect.void,
   });
   const client = HttpClient.make((request) => {
     requests++;
     if (request.url.includes("/stop")) stops++;
     authorizations.push(request.headers.authorization);
-    if (request.method === "PATCH" && request.body._tag === "Uint8Array") {
+    if (request.body._tag === "Uint8Array") {
       const payload: unknown = JSON.parse(new TextDecoder().decode(request.body.body));
-      if (
-        typeof payload === "object" &&
-        payload !== null &&
-        "ttlSeconds" in payload &&
-        typeof payload.ttlSeconds === "number"
-      ) {
-        extensionTtls.push(payload.ttlSeconds);
-        if (payload.ttlSeconds > 900) extensions++;
+      bodies.push([request.method, request.url, payload] as const);
+      if (request.method === "PATCH") {
+        if (
+          typeof payload === "object" &&
+          payload !== null &&
+          "ttlSeconds" in payload &&
+          typeof payload.ttlSeconds === "number"
+        ) {
+          extensionTtls.push(payload.ttlSeconds);
+          if (payload.ttlSeconds > 900) extensions++;
+        }
       }
-    }
+    } else bodies.push([request.method, request.url, null] as const);
     return beforeRequest(request.url).pipe(
       Effect.andThen(
         request.url.includes("/activity") ? (activity.probe ?? Effect.void) : Effect.void,
@@ -221,6 +226,7 @@ export const fixture = (
       driverKind = value;
     },
     authorizations: (): readonly (string | undefined)[] => authorizations,
+    bodies: (): readonly (readonly [method: string, url: string, body: unknown])[] => bodies,
     setSpend: (profileId: string, usd: number) => {
       spend.set(profileId, usd);
     },

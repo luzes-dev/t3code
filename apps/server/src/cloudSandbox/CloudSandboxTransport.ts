@@ -93,6 +93,8 @@ export class CloudSandboxTransport extends Context.Service<
       effect: (target: DesktopSshEnvironmentTarget) => Effect.Effect<A, E, R | Scope.Scope>,
     ) => Effect.Effect<A, E | CloudSandboxManagerError, Exclude<R, Scope.Scope>>;
     readonly pairingToken: (resourceId: string) => Effect.Effect<string, CloudSandboxManagerError>;
+    /** Drops the resource's first-use SSH host-key pin; used when its VM is deleted. */
+    readonly forgetHostKey: (resourceId: string) => Effect.Effect<void>;
   }
 >()("t3/cloudSandbox/CloudSandboxTransport") {}
 const isManagerError = Schema.is(CloudSandboxManagerError);
@@ -169,6 +171,15 @@ export const make = Effect.gen(function* () {
   yield* fs.makeDirectory(directory, { recursive: true, mode: 0o700 });
   const identityFile = path.join(directory, "id_ed25519");
   const publicKeyFile = `${identityFile}.pub`;
+  // First-use SSH host-key pins, durable across restarts. A resource id never
+  // rebinds to a new VM, so a changed key for the same resource is a MITM or a
+  // provider-side rebuild and connects must fail until the resource is deleted.
+  const hostPinsFile = path.join(directory, "host-pins.json");
+  const HostPin = Schema.Struct({ hash: Schema.String, hostKey: Schema.String });
+  const HostPinsFile = Schema.Record(Schema.String, HostPin);
+  const encodeHostPins = Schema.encodeEffect(Schema.fromJsonString(HostPinsFile));
+  const decodeHostPins = Schema.decodeUnknownEffect(Schema.fromJsonString(HostPinsFile));
+  const hostPins = new Map<string, { readonly hash: string; readonly hostKey: string }>();
   const ensureKey = locks.withLock(
     "ssh-key",
     Effect.gen(function* () {
@@ -198,6 +209,34 @@ export const make = Effect.gen(function* () {
       return yield* fs.readFileString(publicKeyFile);
     }),
   );
+  const writeHostPins = Effect.gen(function* () {
+    yield* fs.writeFileString(
+      hostPinsFile,
+      yield* encodeHostPins(Object.fromEntries(hostPins.entries())),
+      { mode: 0o600 },
+    );
+    // A failed pin write is not fatal: the in-memory pin still guards this
+    // process, and the next connect rewrites the file.
+  }).pipe(Effect.ignore);
+  const loadHostPins = Effect.gen(function* () {
+    const content = yield* fs.readFileString(hostPinsFile).pipe(Effect.option);
+    if (Option.isNone(content)) return;
+    // A corrupt pins file must not block provisioning: it is ignored and the
+    // next connect re-establishes first-use trust.
+    const pins = yield* decodeHostPins(content.value).pipe(
+      Effect.mapError((cause) => ({ cause })),
+      Effect.option,
+    );
+    if (Option.isSome(pins))
+      for (const [resourceId, pin] of Object.entries(pins.value))
+        hostPins.set(resourceId, { hash: pin.hash, hostKey: pin.hostKey });
+  });
+  yield* loadHostPins;
+  const forgetHostKey = Effect.fn("CloudSandboxTransport.forgetHostKey")(function* (
+    resourceId: string,
+  ) {
+    if (hostPins.delete(resourceId)) yield* writeHostPins;
+  }, Effect.provide(captured));
   const disconnect = Effect.fn("CloudSandboxTransport.disconnect")(function* (resourceId: string) {
     const entry = entries.get(resourceId);
     const target = entry?.target ?? pendingTargets.get(resourceId);
@@ -235,6 +274,18 @@ export const make = Effect.gen(function* () {
           new TextEncoder().encode(`${driver.kind}:${input.sandboxId}`),
         ),
       );
+      const pin = hostPins.get(input.resourceId);
+      if (pin && (pin.hash !== hash || pin.hostKey !== hostKey))
+        return yield* new CloudSandboxManagerError({
+          reason: "transport",
+          cause: new Error(
+            "The sandbox's SSH host key changed since its first connection. Delete the sandbox and provision it again.",
+          ),
+        });
+      if (!pin) {
+        hostPins.set(input.resourceId, { hash, hostKey });
+        yield* writeHostPins;
+      }
       const hostKeyAlias = `t3-cloud-${hash}`;
       const knownHostsFile = path.join(directory, `${hash}.known-hosts`);
       yield* fs.writeFileString(knownHostsFile, `${hostKeyAlias} ${hostKey}\n`, {
@@ -380,6 +431,9 @@ export const make = Effect.gen(function* () {
         ),
       );
     }, Effect.provide(captured)),
+    forgetHostKey: Effect.fn("CloudSandboxTransport.forgetHostKeyLocked")((resourceId) =>
+      locks.withLock(resourceId, forgetHostKey(resourceId)),
+    ),
   });
 });
 export const layer = Layer.effect(CloudSandboxTransport, make).pipe(

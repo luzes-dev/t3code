@@ -80,6 +80,7 @@ export function createBoatCloudSandboxDriver(client: BoatApiClient): BaseCloudSa
             ? {}
             : { autoStopMinutes: input.autoStopMinutes }),
           ...(input.template === undefined ? {} : { template: input.template }),
+          ...(input.noEnv === undefined ? {} : { noEnv: input.noEnv }),
         })
         .pipe(Effect.map(mapDetails), Effect.mapError(mapError));
     }),

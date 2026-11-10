@@ -5,7 +5,7 @@ import * as Queue from "effect/Queue";
 import * as TestClock from "effect/testing/TestClock";
 import { CloudSandboxRenewalsEnabled } from "./CloudSandboxManager.ts";
 import { expect, it } from "@effect/vitest";
-import { ManagedCloudSandboxResourceId, SandboxProfileId } from "@t3tools/contracts";
+import { EnvironmentId, ManagedCloudSandboxResourceId, SandboxProfileId } from "@t3tools/contracts";
 import type { CloudSandboxDetails } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import {
@@ -1180,4 +1180,88 @@ it.effect("runs a non-Boat provider through the same allocation and lifecycle ru
     expect(f.records.has("foreign-machine")).toBe(false);
     expect(counters.created).toBe(1);
   }).pipe(Effect.scoped),
+);
+
+it.effect("creates every managed VM without account env inheritance", () =>
+  Effect.gen(function* () {
+    const f = fixture();
+    const manager = yield* f.manager;
+    const id = ManagedCloudSandboxResourceId.make("no-env");
+    yield* manager.provision({
+      operationId: id,
+      profile: SandboxProfileId.make("fixture"),
+      sandbox: { name: "test", size: "small", autoStopMinutes: 15 },
+    });
+    const create = f
+      .bodies()
+      .find(([method, url]) => method === "POST" && url.endsWith("/sandboxes"));
+    expect(create?.[2]).toMatchObject({ noEnv: true, type: "small", ttlSeconds: 900 });
+    expect(create?.[2]).toHaveProperty("noEnv", true);
+    expect(create?.[0]).toBe("POST");
+  }).pipe(Effect.scoped),
+);
+
+it.effect.each(["found", "missing"] as const)(
+  "reconciles a lost create response by the durable name: %s",
+  (orphanState) =>
+    Effect.gen(function* () {
+      const f = fixture();
+      const manager = yield* f.manager;
+      const id = ManagedCloudSandboxResourceId.make("lost-create");
+      f.records.set(id, {
+        resourceId: id,
+        controllerEnvironmentId: EnvironmentId.make("controller"),
+        profileId: SandboxProfileId.make("fixture"),
+        driverKind: "boat",
+        sandboxId: null,
+        parentResourceId: null,
+        lifecycle: "allocating",
+        power: "running",
+        intent: "connected",
+        environmentId: null,
+        label: "test",
+        selection: { requestId: id, name: "test", size: "small", autoStopMinutes: 15 },
+        snapshotName: null,
+        snapshotReady: false,
+        deletionOperationId: null,
+        finalSpendUsd: null,
+        recordingIds: [],
+        enableLinkedEnvironments: false,
+      });
+      const creates: string[] = [];
+      f.setResponse((url, method) => {
+        if (method === "GET" && new URL(url).pathname.endsWith("/sandboxes")) {
+          return Response.json({
+            ok: true,
+            sandboxes:
+              orphanState === "found"
+                ? [
+                    {
+                      id: "bx_lost_create",
+                      name: `t3-${id}`,
+                      state: "ready",
+                      type: "small",
+                      createdAt: "2026-01-01T00:00:00Z",
+                      archiveAfter: null,
+                    },
+                  ]
+                : [{ id: "bx_other", name: "unrelated-vm", state: "ready", type: "small" }],
+          });
+        }
+        if (method === "POST" && new URL(url).pathname.endsWith("/sandboxes")) creates.push(url);
+        return undefined;
+      });
+      yield* manager.reconcile;
+      if (orphanState === "found") {
+        expect(f.records.get(id)).toMatchObject({
+          sandboxId: "bx_lost_create",
+          lifecycle: "active",
+        });
+        expect(f.connections()).toBe(1);
+      } else {
+        expect(f.records.get(id)).toMatchObject({ sandboxId: null, lifecycle: "failed" });
+        expect(f.connections()).toBe(0);
+      }
+      expect(creates).toHaveLength(0);
+    }).pipe(Effect.scoped),
 );

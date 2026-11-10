@@ -57,6 +57,11 @@ export interface CreateSandboxParams {
   readonly size?: string;
   readonly autoStopMinutes?: number;
   readonly template?: string;
+  /**
+   * Excludes provider account credentials from the fresh VM. Drivers that
+   * cannot disable account inheritance must fail the create, not ignore this.
+   */
+  readonly noEnv?: boolean;
 }
 
 export interface ForkableSandbox {

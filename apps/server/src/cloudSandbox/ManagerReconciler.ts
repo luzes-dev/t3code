@@ -28,7 +28,7 @@ export const makeReconciler = (
     driverFor,
     stopWorker,
   } = rt;
-  const { connectRecord, connectUnlocked } = connections;
+  const { connectRecord, connectUnlocked, recoverUnallocated } = connections;
   const { release } = allocation;
   const checkRoute = Effect.fn("CloudSandboxManager.checkRoute")(function* (
     record: Store.CloudSandboxRecord,
@@ -83,7 +83,9 @@ export const makeReconciler = (
     const record = yield* requireRecord(id);
     if (record.lifecycle === "deleting") return true;
     if (record.lifecycle === "allocating" && record.sandboxId === null) {
-      yield* store.save({ ...record, lifecycle: "failed" });
+      // A lost create response may have left a billable VM behind: rediscover it
+      // by the durable name before giving up on the record.
+      yield* recoverUnallocated(record);
       return false;
     }
     if (

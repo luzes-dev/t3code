@@ -270,7 +270,15 @@ Once the budget is reached, new sandboxes are refused. The budget counts running
 sandboxes, plus the minimum window the new one would run. When the provider does not report a
 price for a machine, a configured budget refuses that machine rather than guessing it free. A
 stopped sandbox's disk is deleted once its source thread is deleted, or at any time from the
-Cloud sandboxes section.
+Cloud sandboxes section. Sandboxes never receive the boat.dev account's environment
+variables: a fresh machine starts clean, and a template snapshot supplies anything an agent
+needs to sign in.
+
+Removing T3 Code, or the profile, never deletes VMs at the provider by itself. Before you
+remove a profile, delete its sandboxes in the Cloud sandboxes section. A sandbox left behind
+after uninstalling stops on its own after its auto-stop window, but its provider-side disk
+copy and snapshot keep costing storage until you remove them, so sweep the provider console
+when you leave.
 
 Running processes are not copied to a sandbox. Filesystem worktrees remain the default.
 
