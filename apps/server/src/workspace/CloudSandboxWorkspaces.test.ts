@@ -6,6 +6,8 @@ import {
   EnvironmentId,
   ProjectId,
   ManagedCloudSandboxResourceId,
+  type ManagedCloudSandboxIssue,
+  type ManagedCloudSandboxResource,
   type Project,
   ProviderInstanceId,
   SandboxProfileId,
@@ -1280,6 +1282,90 @@ it.effect("repoints live children's links to this server's port and skips the re
         Layer.provideMerge(dependencies),
         Layer.provideMerge(NodeServices.layer),
       ),
+    ),
+    Effect.scoped,
+  );
+});
+
+it.effect("reports a follower's degraded state to its task and clears it on recovery", () => {
+  let listed: readonly ManagedCloudSandboxResource[] = [];
+  const dispatches: Array<{
+    readonly commandId: string;
+    readonly issue?: ManagedCloudSandboxIssue;
+  }> = [];
+  const context = Layer.mergeAll(
+    Sqlite.layerMemory,
+    ServerConfig.layerTest(process.cwd(), { prefix: "t3-sandbox-issues-" }),
+    Layer.mock(Controller.CloudSandboxController)({ available: Effect.succeed(false) }),
+    Layer.mock(Setup.ProjectSetupScriptRunner)({}),
+    Layer.mock(Threads.ThreadManagementService)({
+      getThreadRecords: () =>
+        Effect.succeed(idleThreadProjection(liveThreadShell(ThreadId.make("owner")))),
+      dispatch: (
+        command: Parameters<Threads.ThreadManagementService["Service"]["dispatch"]>[0],
+      ) => {
+        if (command.type === "delegated_task.remote.issue") {
+          dispatches.push({
+            commandId: command.commandId,
+            ...(command.issue === undefined ? {} : { issue: command.issue }),
+          });
+        }
+        return Effect.succeed({ sequence: 1, storedEvents: [] });
+      },
+    }),
+    Layer.mock(Projects.ProjectService)({}),
+    Layer.mock(Links.PeerLinks)({}),
+    Layer.mock(Forwarding.PeerForwarding)({}),
+    Layer.mock(Delegation.RemoteDelegation)({}),
+    Layer.mock(Manager.CloudSandboxManager)({ list: Effect.sync(() => listed) }),
+    Layer.mock(Profiles.CloudSandboxProfiles)({ list: Effect.succeed([]) }),
+    Layer.mock(Git.GitWorkflowService)({}),
+    Layer.mock(GitDriver.GitVcsDriver)({}),
+  );
+  const issue: ManagedCloudSandboxIssue = {
+    cause: "connectivity",
+    driverKind: "boat",
+    profileId: "boat-main",
+    message: "The managed cloud connection could not be established.",
+    firstSeenAt: "2026-02-09T10:00:00Z",
+  };
+  const follower = (withIssue: boolean): ManagedCloudSandboxResource => ({
+    resourceId: ManagedCloudSandboxResourceId.make("follower-1"),
+    controllerEnvironmentId: EnvironmentId.make("source"),
+    driverKind: "boat",
+    profileId: SandboxProfileId.make("boat-main"),
+    sandboxId: "sbx-1",
+    parentResourceId: null,
+    owner: {
+      _tag: "task",
+      hostEnvironmentId: EnvironmentId.make("source"),
+      sourceThreadId: ThreadId.make("owner"),
+      taskId: "task-1",
+    },
+    retention: "stop-and-retain",
+    phase: "connected",
+    environmentId: null,
+    label: "follower",
+    recordingIds: [],
+    ...(withIssue ? { issue } : {}),
+  });
+  return Effect.gen(function* () {
+    const workspaces = yield* Workspaces.CloudSandboxWorkspaces;
+    listed = [follower(true)];
+    expect(yield* workspaces.reportIssues).toBe(1);
+    expect(dispatches).toHaveLength(1);
+    expect(dispatches[0]?.issue?.message).toBe(issue.message);
+    // An unchanged issue reports nothing more.
+    expect(yield* workspaces.reportIssues).toBe(1);
+    expect(dispatches).toHaveLength(1);
+    // Recovery clears the card state exactly once.
+    listed = [follower(false)];
+    expect(yield* workspaces.reportIssues).toBe(0);
+    expect(dispatches).toHaveLength(2);
+    expect(dispatches[1]?.issue).toBeUndefined();
+  }).pipe(
+    Effect.provide(
+      Workspaces.layer.pipe(Layer.provideMerge(context), Layer.provideMerge(NodeServices.layer)),
     ),
     Effect.scoped,
   );

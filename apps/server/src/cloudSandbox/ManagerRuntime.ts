@@ -1,4 +1,5 @@
 import * as Fiber from "effect/Fiber";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -7,6 +8,7 @@ import { HttpClient } from "effect/http";
 import { CloudSandboxDriverFactory, CloudSandboxError } from "@t3tools/cloud-sandbox";
 import type {
   CloudSandboxProfileError,
+  ManagedCloudSandboxIssue,
   ManagedCloudSandboxResource,
   ManagedCloudSandboxResourceId,
   SandboxProfileId,
@@ -37,6 +39,90 @@ export const toManagerError = (cause: CloudSandboxProfileError) =>
     reason: cause.reason === "budget" ? "budget" : "provider",
     cause,
   });
+
+/** The record without its degradation note, as a recovery saves it. */
+export const withoutIssue = (record: Store.CloudSandboxRecord): Store.CloudSandboxRecord => {
+  if (record.issue === undefined) return record;
+  const { issue: _issue, ...rest } = record;
+  return rest;
+};
+
+/**
+ * Saves `issue` on the record as presence, not history: the same cause keeps
+ * its first-seen time while its wording may update, and an unchanged issue
+ * saves nothing. Best effort: a save that cannot land is a logged warning.
+ */
+export const stampIssue = (
+  store: ManagerRuntime["store"],
+  record: Store.CloudSandboxRecord,
+  issue: ManagedCloudSandboxIssue,
+): Effect.Effect<void> => {
+  const current = record.issue;
+  const sameCause =
+    current !== undefined &&
+    current.cause === issue.cause &&
+    current.driverKind === issue.driverKind &&
+    current.profileId === issue.profileId;
+  const next = sameCause ? { ...issue, firstSeenAt: current.firstSeenAt } : issue;
+  if (current !== undefined && current.message === issue.message && sameCause) return Effect.void;
+  return store.save({ ...record, issue: next }).pipe(
+    Effect.catchCause((cause) =>
+      Effect.logWarning("Unable to stamp a follower sandbox issue on its record.", {
+        resourceId: record.resourceId,
+        cause,
+      }),
+    ),
+  );
+};
+
+/** Stamps a failed connect: transport misses read as connectivity, the rest as allocation losses. */
+export const stampConnectIssue = Effect.fn("ManagerRuntime.stampConnectIssue")(function* (
+  store: ManagerRuntime["store"],
+  resourceId: ManagedCloudSandboxResourceId,
+  error: Store.CloudSandboxManagerError,
+) {
+  const row = yield* Effect.option(store.get(resourceId));
+  if (Option.isNone(row)) {
+    yield* Effect.logWarning("Unable to read the follower sandbox record to stamp an issue.", {
+      resourceId,
+    });
+    return;
+  }
+  const found = row.value;
+  if (Option.isNone(found)) return;
+  yield* stampIssue(store, found.value, {
+    cause:
+      error.reason === "transport" || error.reason === "not-found" ? "connectivity" : "allocation",
+    driverKind: found.value.driverKind,
+    profileId: found.value.profileId,
+    message: error.message,
+    firstSeenAt: DateTime.formatIso(yield* DateTime.now),
+  });
+});
+
+/** Stamps a refused ownership bind. */
+export const stampBindIssue = Effect.fn("ManagerRuntime.stampBindIssue")(function* (
+  store: ManagerRuntime["store"],
+  resourceId: ManagedCloudSandboxResourceId,
+  error: Store.CloudSandboxManagerError,
+) {
+  const row = yield* Effect.option(store.get(resourceId));
+  if (Option.isNone(row)) {
+    yield* Effect.logWarning("Unable to read the follower sandbox record to stamp an issue.", {
+      resourceId,
+    });
+    return;
+  }
+  const found = row.value;
+  if (Option.isNone(found)) return;
+  yield* stampIssue(store, found.value, {
+    cause: "bind",
+    driverKind: found.value.driverKind,
+    profileId: found.value.profileId,
+    message: error.message,
+    firstSeenAt: DateTime.formatIso(yield* DateTime.now),
+  });
+});
 
 const publicPhase = (
   record: Store.CloudSandboxRecord,

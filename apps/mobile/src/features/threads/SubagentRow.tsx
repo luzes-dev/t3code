@@ -5,6 +5,7 @@ import {
   shouldShowInstanceBadge,
 } from "@t3tools/client-runtime/state/provider-instance-display";
 import { resolveSubagentMetadata } from "@t3tools/client-runtime/state/subagent-display";
+import { describeManagedCloudSandboxIssue } from "@t3tools/client-runtime/state/cloudSandbox";
 import { formatSubagentEffort } from "@t3tools/client-runtime/state/thread-execution";
 import type { EnvironmentId, OrchestrationV2Subagent } from "@t3tools/contracts";
 import type { ReactNode } from "react";
@@ -187,6 +188,11 @@ function SubagentMetadata(props: {
           </Text>
         </View>
       ))}
+      {subagent.remoteChild?.sandboxIssue ? (
+        <Text className="min-w-0 shrink text-xs text-warning-foreground" numberOfLines={1}>
+          · {describeManagedCloudSandboxIssue(subagent.remoteChild.sandboxIssue)}
+        </Text>
+      ) : null}
     </View>
   );
 }

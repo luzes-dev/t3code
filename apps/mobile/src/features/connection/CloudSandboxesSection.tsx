@@ -5,8 +5,10 @@ import {
   countRunningCloudSandboxes,
   describeCloudSandbox,
   describeCloudSandboxProfile,
+  describeManagedCloudSandboxIssue,
   offersCloudSandboxControl,
   parseSandboxProfileLimits,
+  type ManagedCloudSandboxIssueRollup,
 } from "@t3tools/client-runtime/state/cloudSandbox";
 import type {
   CloudSandboxProfileStatus,
@@ -26,6 +28,7 @@ import {
   cloudSandboxOperation,
   deleteManagedSandbox,
   managedSandboxesAtom,
+  managedSandboxIssuesAtom,
   sandboxProfilesDelete,
   sandboxProfilesList,
   sandboxProfilesSave,
@@ -46,12 +49,21 @@ export function CloudSandboxesSection({
 }) {
   const profiles = useEnvironmentQuery(sandboxProfilesList({ environmentId, input: {} }));
   const sandboxes = useEnvironmentQuery(managedSandboxesAtom(environmentId));
+  const issues = useEnvironmentQuery(managedSandboxIssuesAtom(environmentId));
   const profileRows = profiles.data?.profiles ?? [];
   const sandboxRows = sandboxes.data ?? [];
+  const issueRows = issues.data ?? [];
   const { presentationById } = useEnvironments();
   if (profileRows.length === 0 && sandboxRows.length === 0) return null;
   return (
     <>
+      {issueRows.length > 0 ? (
+        <SettingsSection title="Follower issues">
+          {issueRows.map((issue) => (
+            <FollowerIssueBanner key={issue.key} issue={issue} />
+          ))}
+        </SettingsSection>
+      ) : null}
       {profileRows.length > 0 ? (
         <SettingsSection title="Cloud sandbox profiles">
           {profileRows.map((status) => (
@@ -80,6 +92,18 @@ export function CloudSandboxesSection({
         </SettingsSection>
       ) : null}
     </>
+  );
+}
+
+function FollowerIssueBanner({ issue }: { readonly issue: ManagedCloudSandboxIssueRollup }) {
+  const affected = issue.affectedResourceIds.length;
+  return (
+    <View>
+      <ListRowLayout
+        label={describeManagedCloudSandboxIssue(issue)}
+        description={`${affected > 1 ? `${affected} follower sandboxes` : "1 follower sandbox"} affected since ${new Date(issue.firstSeenAt).toLocaleString()}. The fix belongs to the controller host's cloud profile: sign in again from a profile row above.`}
+      />
+    </View>
   );
 }
 
@@ -331,6 +355,11 @@ function ManagedSandboxRow({
   return (
     <View>
       <ListRowLayout label={resource.label} description={describeCloudSandbox(resource)} />
+      {resource.issue ? (
+        <Text selectable className="px-4 pb-2 text-sm text-danger-foreground">
+          {describeManagedCloudSandboxIssue(resource.issue)}
+        </Text>
+      ) : null}
       {error ? (
         <Text selectable className="px-4 pb-2 text-sm text-danger-foreground">
           {error}

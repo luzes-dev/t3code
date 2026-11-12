@@ -10,8 +10,10 @@ import {
   countRunningCloudSandboxes,
   describeCloudSandbox,
   describeCloudSandboxProfile,
+  describeManagedCloudSandboxIssue,
   offersCloudSandboxControl,
   parseSandboxProfileLimits,
+  type ManagedCloudSandboxIssueRollup,
 } from "@t3tools/client-runtime/state/cloudSandbox";
 import * as Result from "effect/Result";
 import { useState } from "react";
@@ -22,6 +24,7 @@ import {
   cloudSandboxOperation,
   deleteManagedSandbox,
   managedSandboxesAtom,
+  managedSandboxIssuesAtom,
 } from "~/connection/cloudSandbox";
 import { connectCloudSandboxEnvironment } from "~/connection/onboarding";
 import {
@@ -48,8 +51,12 @@ export function CloudSandboxesSettings() {
   const sandboxes = useEnvironmentQuery(
     environmentId === null ? null : managedSandboxesAtom(environmentId),
   );
+  const issues = useEnvironmentQuery(
+    environmentId === null ? null : managedSandboxIssuesAtom(environmentId),
+  );
   const profileRows = profiles.data?.profiles ?? [];
   const sandboxRows = sandboxes.data ?? [];
+  const issueRows = issues.data ?? [];
   if (environmentId === null || (profileRows.length === 0 && sandboxRows.length === 0)) {
     return null;
   }
@@ -57,6 +64,16 @@ export function CloudSandboxesSettings() {
   const search = searchableSetting("cloud-sandboxes");
   return (
     <SettingsSection {...search}>
+      {issueRows.length > 0 ? (
+        <div>
+          <h3 className="px-3 pt-3 text-xs font-medium text-muted-foreground sm:px-4">
+            Follower issues
+          </h3>
+          {issueRows.map((issue) => (
+            <FollowerIssueBanner key={issue.key} issue={issue} />
+          ))}
+        </div>
+      ) : null}
       {profileRows.length > 0 ? (
         <div>
           <h3 className="px-3 pt-3 text-xs font-medium text-muted-foreground sm:px-4">Profiles</h3>
@@ -87,6 +104,28 @@ export function CloudSandboxesSettings() {
         </div>
       ) : null}
     </SettingsSection>
+  );
+}
+
+function FollowerIssueBanner({ issue }: { readonly issue: ManagedCloudSandboxIssueRollup }) {
+  const affected = issue.affectedResourceIds.length;
+  return (
+    <div className={ITEM_ROW_CLASSNAME}>
+      <div className={ITEM_ROW_INNER_CLASSNAME}>
+        <div className="min-w-0 flex-1 space-y-1">
+          <h3 className="text-sm font-medium text-destructive">
+            {describeManagedCloudSandboxIssue(issue)}
+          </h3>
+          <p className="text-xs text-muted-foreground">
+            {affected > 1
+              ? `${issue.affectedResourceIds.length} follower sandboxes`
+              : "1 follower sandbox"}{" "}
+            affected since {new Date(issue.firstSeenAt).toLocaleString()}. The fix belongs to the
+            controller host's cloud profile: sign in again from a profile row above.
+          </p>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -357,6 +396,11 @@ function ManagedSandboxRow({
         <div className="min-w-0 flex-1 space-y-1">
           <h3 className="text-sm font-medium text-foreground">{resource.label}</h3>
           <p className="text-xs text-muted-foreground">{describeCloudSandbox(resource)}</p>
+          {resource.issue ? (
+            <p className="text-xs text-destructive">
+              {describeManagedCloudSandboxIssue(resource.issue)}
+            </p>
+          ) : null}
           {error ? <p className="text-xs text-destructive">{error}</p> : null}
         </div>
         <div className="flex w-full shrink-0 flex-wrap items-center gap-2 sm:w-auto sm:justify-end">

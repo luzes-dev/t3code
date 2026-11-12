@@ -16,6 +16,7 @@ const { Children, mocks } = vi.hoisted(() => ({
   mocks: {
     profiles: null as null | { readonly profiles: ReadonlyArray<unknown> },
     sandboxes: null as null | ReadonlyArray<unknown>,
+    issues: [] as ReadonlyArray<unknown>,
     confirm: vi.fn<(request: { readonly onConfirm: () => void }) => void>(),
     deleteProfile: vi.fn(),
     deleteSandbox: vi.fn(),
@@ -70,7 +71,9 @@ vi.mock("../../state/query", () => ({
     const data =
       typeof query === "object" && query !== null && "input" in query
         ? mocks.profiles
-        : mocks.sandboxes;
+        : typeof query === "object" && query !== null && "issuesFor" in query
+          ? mocks.issues
+          : mocks.sandboxes;
     return { data, refresh: vi.fn() };
   },
 }));
@@ -85,6 +88,7 @@ vi.mock("../../state/cloudSandboxes", () => ({
     permissionAtom: () => Atom.make(true),
   }),
   managedSandboxesAtom: (environmentId: unknown) => ({ sandboxesFor: environmentId }),
+  managedSandboxIssuesAtom: (environmentId: unknown) => ({ issuesFor: environmentId }),
   cloudSandboxOperation: Object.assign(vi.fn(), { permissionAtom: () => Atom.make(true) }),
   deleteManagedSandbox: mocks.deleteSandbox,
 }));

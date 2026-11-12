@@ -1,6 +1,12 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { EnvironmentId, PositiveInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  EnvironmentId,
+  IsoDateTime,
+  PositiveInt,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 import {
   CloudSandboxCapabilities,
   CloudSandboxDetails,
@@ -37,6 +43,20 @@ export type ManagedSandboxRetention = typeof ManagedSandboxRetention.Type;
 /** Legacy records without owner/retention metadata decode as user-owned and manual. */
 export const legacyOwner = (): ManagedSandboxOwner => ({ _tag: "user" });
 export const legacyRetention = (): ManagedSandboxRetention => "manual";
+
+/**
+ * Why a managed sandbox is degraded, as its owner-facing and admin surfaces render
+ * it. Emitters overwrite on retry and clear on recovery: presence is state, not
+ * history. Plain strings, not branded ids, so record spreads keep their inference stable.
+ */
+export const ManagedCloudSandboxIssue = Schema.Struct({
+  cause: Schema.Literals(["provider-auth", "connectivity", "bind", "allocation"]),
+  driverKind: Schema.String,
+  profileId: Schema.String,
+  message: TrimmedNonEmptyString,
+  firstSeenAt: IsoDateTime,
+});
+export type ManagedCloudSandboxIssue = typeof ManagedCloudSandboxIssue.Type;
 export type ManagedSandboxFollowerOwner = Exclude<ManagedSandboxOwner, { _tag: "user" }>;
 export const MANAGED_CLOUD_SANDBOX_PATH = "/api/cloud-sandboxes/managed";
 export const managedCloudSandboxProxyPath = (resourceId: string) =>
@@ -72,6 +92,8 @@ export const ManagedCloudSandboxResource = Schema.Struct({
   environmentId: Schema.NullOr(EnvironmentId),
   label: Schema.String,
   recordingIds: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  /** Present while the resource is degraded; cleared when it connects again. */
+  issue: Schema.optional(ManagedCloudSandboxIssue),
 });
 export type ManagedCloudSandboxResource = typeof ManagedCloudSandboxResource.Type;
 export const ManagedCloudSandboxConnection = Schema.Struct({

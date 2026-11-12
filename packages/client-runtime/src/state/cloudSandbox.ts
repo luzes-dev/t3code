@@ -2,6 +2,7 @@ import {
   type CloudSandboxProfileStatus,
   type EnvironmentId,
   type ManagedCloudSandboxControlOperation,
+  type ManagedCloudSandboxIssue,
   type ManagedCloudSandboxResource,
   type ManagedCloudSandboxResourceId,
 } from "@t3tools/contracts";
@@ -105,6 +106,64 @@ export function selectableEnvironmentIds(
   return selectable;
 }
 
+/** One collapsed warning for every degraded follower of one cloud profile. */
+export interface ManagedCloudSandboxIssueRollup {
+  readonly key: string;
+  readonly cause: ManagedCloudSandboxIssue["cause"];
+  readonly driverKind: string;
+  readonly profileId: string;
+  readonly message: string;
+  readonly firstSeenAt: string;
+  readonly affectedResourceIds: readonly ManagedCloudSandboxResourceId[];
+}
+
+const MANAGED_SANDBOX_ISSUE_CAUSE_LABELS: Record<ManagedCloudSandboxIssue["cause"], string> = {
+  "provider-auth": "Cloud token refused",
+  connectivity: "Connection lost",
+  bind: "Ownership not bound",
+  allocation: "Allocation refused",
+};
+
+/** One line a task card or admin row shows for a degraded follower sandbox. */
+export function describeManagedCloudSandboxIssue(issue: ManagedCloudSandboxIssue): string {
+  return `${MANAGED_SANDBOX_ISSUE_CAUSE_LABELS[issue.cause]}: ${issue.message}`;
+}
+
+/** The cause a warning collapses on: one dead profile token is one warning. */
+export function managedSandboxIssueRollup(
+  resources: readonly ManagedCloudSandboxResource[],
+): readonly ManagedCloudSandboxIssueRollup[] {
+  const groups = new Map<string, ManagedCloudSandboxIssueRollup>();
+  for (const resource of resources) {
+    // The collapse is of followers' emission; a user-owned sandbox's own
+    // rows already speak for themselves, and the issue is absent when healthy.
+    if (resource.owner._tag === "user" || resource.issue === undefined) continue;
+    const { driverKind, profileId, cause, message, firstSeenAt } = resource.issue;
+    const key = `${driverKind}:${profileId}:${cause}`;
+    const existing = groups.get(key);
+    if (existing === undefined) {
+      groups.set(key, {
+        key,
+        cause,
+        driverKind,
+        profileId,
+        message,
+        firstSeenAt,
+        affectedResourceIds: [resource.resourceId],
+      });
+      continue;
+    }
+    groups.set(key, {
+      ...existing,
+      firstSeenAt: firstSeenAt < existing.firstSeenAt ? firstSeenAt : existing.firstSeenAt,
+      affectedResourceIds: [...existing.affectedResourceIds, resource.resourceId],
+    });
+  }
+  return [...groups.values()].sort((left, right) =>
+    right.firstSeenAt.localeCompare(left.firstSeenAt),
+  );
+}
+
 /** Stop and resume are offered only in these phases; resume for a stopped sandbox. */
 export function offersCloudSandboxControl(phase: ManagedCloudSandboxResource["phase"]): boolean {
   return (
@@ -199,6 +258,13 @@ export function createManagedSandboxAtoms<R, E>(
       AsyncResult.map(result, (resources) => resources.filter(isSelectableEnvironment)),
     ),
   );
+  // Degraded followers, collapsed per cause: one warning naming one fix (the
+  // profile's login on this controller) instead of one row per broken sandbox.
+  const issues = Atom.family((controllerEnvironmentId: EnvironmentId) =>
+    Atom.map(list(controllerEnvironmentId), (result) =>
+      AsyncResult.map(result, managedSandboxIssueRollup),
+    ),
+  );
   const remove = createRuntimeCommand(runtime, {
     label: "environment-data:cloud-sandbox:delete-managed",
     execute: Effect.fn("clientRuntime.cloudSandbox.deleteManagedSandboxCommand")(function* (input: {
@@ -208,5 +274,5 @@ export function createManagedSandboxAtoms<R, E>(
       return yield* deleteControllerSandbox(input.controllerEnvironmentId, input.resourceId);
     }),
   });
-  return { list, selectable, remove };
+  return { list, selectable, issues, remove };
 }

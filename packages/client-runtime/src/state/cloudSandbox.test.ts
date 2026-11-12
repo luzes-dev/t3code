@@ -17,7 +17,9 @@ import {
   countRunningCloudSandboxes,
   describeCloudSandbox,
   describeCloudSandboxProfile,
+  describeManagedCloudSandboxIssue,
   isSelectableEnvironment,
+  managedSandboxIssueRollup,
   offersCloudSandboxControl,
   parseSandboxProfileLimits,
   selectableEnvironmentIds,
@@ -60,6 +62,7 @@ const resource = (overrides: {
   readonly sandboxId?: string | null;
   readonly owner?: ManagedCloudSandboxResource["owner"];
   readonly environmentId?: ManagedCloudSandboxResource["environmentId"];
+  readonly issue?: ManagedCloudSandboxResource["issue"];
 }): ManagedCloudSandboxResource => ({
   resourceId: ManagedCloudSandboxResourceId.make(overrides.id),
   controllerEnvironmentId: EnvironmentId.make("controller"),
@@ -76,6 +79,7 @@ const resource = (overrides: {
   environmentId: overrides.environmentId ?? null,
   label: overrides.id,
   recordingIds: [],
+  ...(overrides.issue === undefined ? {} : { issue: overrides.issue }),
 });
 
 describe("selectable environments", () => {
@@ -237,5 +241,78 @@ describe("cloudSandboxFailureMessage", () => {
     expect(
       cloudSandboxFailureMessage(AsyncResult.failure(Cause.fail(new Error("Offline"))), "fallback"),
     ).toBe("Offline");
+  });
+});
+
+describe("managedSandboxIssueRollup", () => {
+  const issue = {
+    cause: "connectivity",
+    driverKind: "boat",
+    profileId: "boat-main",
+    message: "The managed cloud connection could not be established.",
+    firstSeenAt: "2026-02-09T10:00:00Z",
+  } as const;
+  const taskOwner = {
+    _tag: "task",
+    hostEnvironmentId: EnvironmentId.make("controller"),
+    sourceThreadId: ThreadId.make("thread-1"),
+    taskId: "node-1",
+  } as const;
+
+  it("collapses every follower of one dead profile token into one warning", () => {
+    const rollup = managedSandboxIssueRollup([
+      resource({
+        id: "a",
+        phase: "connected",
+        owner: taskOwner,
+        issue: { ...issue, firstSeenAt: "2026-02-09T10:05:00Z" },
+      }),
+      resource({
+        id: "b",
+        phase: "failed",
+        owner: taskOwner,
+        issue: { ...issue, message: "The peer connection dropped." },
+      }),
+      resource({
+        id: "c",
+        phase: "failed",
+        owner: taskOwner,
+        issue: { ...issue, firstSeenAt: "2026-02-09T09:30:00Z" },
+      }),
+    ]);
+    expect(rollup).toHaveLength(1);
+    expect(rollup[0]?.firstSeenAt).toBe("2026-02-09T09:30:00Z");
+    expect(rollup[0]?.affectedResourceIds.map(String)).toEqual(["a", "b", "c"]);
+    expect(rollup[0]?.key).toBe("boat:boat-main:connectivity");
+  });
+
+  it("keeps user-owned sandboxes out and healthy rows silent", () => {
+    const rollup = managedSandboxIssueRollup([
+      resource({ id: "own", phase: "failed", issue: { ...issue, cause: "allocation" } }),
+      resource({ id: "healthy", phase: "connected", owner: taskOwner }),
+    ]);
+    expect(rollup).toEqual([]);
+  });
+
+  it("splits distinct causes of the same profile into separate warnings", () => {
+    const rollup = managedSandboxIssueRollup([
+      resource({ id: "a", phase: "failed", owner: taskOwner, issue }),
+      resource({
+        id: "b",
+        phase: "failed",
+        owner: taskOwner,
+        issue: { ...issue, cause: "provider-auth" },
+      }),
+    ]);
+    expect(rollup.map((entry) => entry.cause).toSorted()).toEqual([
+      "connectivity",
+      "provider-auth",
+    ]);
+  });
+
+  it("describes an issue with its cause label and the server's message", () => {
+    expect(describeManagedCloudSandboxIssue(issue)).toBe(
+      "Connection lost: The managed cloud connection could not be established.",
+    );
   });
 });

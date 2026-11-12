@@ -40,4 +40,6 @@ const managedSandboxes = createManagedSandboxAtoms(connectionAtomRuntime);
 export const managedSandboxesAtom = managedSandboxes.list;
 // Pickers read this owner-derived view; the full list stays for admin surfaces.
 export const selectableManagedSandboxesAtom = managedSandboxes.selectable;
+// Degraded followers, collapsed per cause: one warning naming one fix.
+export const managedSandboxIssuesAtom = managedSandboxes.issues;
 export const deleteManagedSandbox = managedSandboxes.remove;

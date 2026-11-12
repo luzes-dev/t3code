@@ -1,4 +1,5 @@
 import * as Mac from "effect/crypto/Mac";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Hex from "effect/encoding/Hex";
@@ -15,7 +16,14 @@ import {
 } from "@t3tools/contracts";
 import * as Store from "./CloudSandboxStore.ts";
 import type { ManagedCloudSandboxRoute } from "./CloudSandboxManager.ts";
-import { isDeletedOrDeleting, toError, type ManagerRuntime } from "./ManagerRuntime.ts";
+import {
+  isDeletedOrDeleting,
+  stampConnectIssue,
+  stampIssue,
+  toError,
+  withoutIssue,
+  type ManagerRuntime,
+} from "./ManagerRuntime.ts";
 
 const decodeActivity = Schema.decodeUnknownEffect(CloudSandboxActivity);
 export const makeConnections = (rt: ManagerRuntime) => {
@@ -131,7 +139,17 @@ export const makeConnections = (rt: ManagerRuntime) => {
     const driver = yield* driverFor(record);
     const orphan = yield* adoptOrphanSandbox(record, driver);
     if (Option.isNone(orphan)) {
-      yield* store.save({ ...record, lifecycle: "failed" });
+      const failed = { ...record, lifecycle: "failed" as const };
+      yield* store.save(failed);
+      // No VM was recovered: the record says why, and its owner's card learns
+      // from the workspaces reporter.
+      yield* stampIssue(store, failed, {
+        cause: "allocation",
+        driverKind: failed.driverKind,
+        profileId: failed.profileId,
+        message: "No virtual machine could be recovered for this sandbox.",
+        firstSeenAt: DateTime.formatIso(yield* DateTime.now),
+      });
       return;
     }
     const recovered = { ...record, sandboxId: orphan.value };
@@ -211,6 +229,8 @@ export const makeConnections = (rt: ManagerRuntime) => {
       label: connected.label,
     };
     yield* store.save(record);
+    // Connected again: the record's issue was presence, and recovery erases it.
+    if (record.issue !== undefined) yield* store.save(withoutIssue(record));
     if (record.snapshotName !== null && driver.snapshots) {
       yield* driver.snapshots.delete(record.snapshotName);
       record = { ...record, snapshotName: null };
@@ -247,6 +267,9 @@ export const makeConnections = (rt: ManagerRuntime) => {
     allowResume: boolean,
   ) {
     return yield* connectRecordUnchecked(initial, allowResume).pipe(
+      // Stamp the loss on the record before the cleanup below re-saves it:
+      // both the owner's card and the admin list read the record's issue.
+      Effect.tapError((error) => stampConnectIssue(store, initial.resourceId, error)),
       Effect.onExit((exit) => {
         if (Exit.isSuccess(exit)) return Effect.void;
         return Effect.gen(function* () {

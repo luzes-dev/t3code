@@ -25,7 +25,7 @@ import * as Transport from "./CloudSandboxTransport.ts";
 import { makeAllocation } from "./ManagerAllocation.ts";
 import { makeConnections } from "./ManagerConnections.ts";
 import { makeControl } from "./ManagerControl.ts";
-import { makeManagerRuntime } from "./ManagerRuntime.ts";
+import { makeManagerRuntime, stampBindIssue } from "./ManagerRuntime.ts";
 import { makeReconciler } from "./ManagerReconciler.ts";
 import { cloudSandboxDriverFactoryLayer } from "@t3tools/cloud-sandbox";
 
@@ -150,10 +150,16 @@ export const make = Effect.gen(function* () {
     sourceContext,
     executeSource,
     bindOwner: Effect.fn("CloudSandboxManager.bindOwner")((resourceId, owner, retention) =>
-      locks.withLock(
-        resourceId,
-        bindOwnerLocked(resourceId, owner, rt.controllerEnvironmentId, retention),
-      ),
+      locks
+        .withLock(
+          resourceId,
+          bindOwnerLocked(resourceId, owner, rt.controllerEnvironmentId, retention),
+        )
+        .pipe(
+          // A refused bind stays user-owned until a retry or the orphan sweep;
+          // the record says so, and the workspaces reporter tells the owner's card.
+          Effect.tapError((error) => stampBindIssue(store, resourceId, error)),
+        ),
     ),
     get: Effect.fn("CloudSandboxManager.get")((id) =>
       requireRecord(id).pipe(Effect.map(publicResource)),

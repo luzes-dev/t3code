@@ -1,8 +1,11 @@
 import * as ServerConfig from "../config.ts";
 import {
+  CommandId,
   EnvironmentId,
+  ManagedCloudSandboxIssue,
   ManagedCloudSandboxResourceId,
   MANAGED_CLOUD_SOURCE_PORT,
+  NodeId,
   SandboxWorktreeHandoffResult,
   ThreadId,
   ProjectId,
@@ -137,7 +140,14 @@ export class CloudSandboxWorkspaces extends Context.Service<
      * Does nothing where the controller reaches children directly.
      */
     readonly repointLinks: Effect.Effect<number, WorktreeMcpFailure>;
-    /** Forks the periodic sweep and link repointing; call once per server start. */
+    /**
+     * Reports each task-owned follower's degraded state, as the controller
+     * stamped it, onto the owning task's card, and clears the card state when
+     * the resource recovers. Only changes dispatch; repeated reports are
+     * idempotent.
+     */
+    readonly reportIssues: Effect.Effect<number, WorktreeMcpFailure>;
+    /** Forks the periodic sweep, link repointing and issue reporting; call once per server start. */
     readonly start: () => Effect.Effect<void, never, Scope.Scope>;
   }
 >()("t3/workspace/CloudSandboxWorkspaces") {}
@@ -640,6 +650,116 @@ export const make = Effect.gen(function* () {
       }),
     );
   });
+  /**
+   * Tells each delegated task's card when its follower sandbox is degraded, and
+   * clears it when the resource recovers, by reading the issue the controller
+   * stamped on the record. Presence is state: only changes dispatch, and a
+   * repeated identical report replays the same command id.
+   */
+  const sameIssue = (
+    left: ManagedCloudSandboxIssue | undefined,
+    right: ManagedCloudSandboxIssue | undefined,
+  ) =>
+    left !== undefined &&
+    right !== undefined &&
+    left.cause === right.cause &&
+    left.driverKind === right.driverKind &&
+    left.profileId === right.profileId &&
+    left.message === right.message &&
+    left.firstSeenAt === right.firstSeenAt;
+
+  const tellTask = (
+    sourceThreadId: ThreadId,
+    taskId: string,
+    issue: ManagedCloudSandboxIssue | undefined,
+  ) =>
+    threads
+      .dispatch({
+        type: "delegated_task.remote.issue",
+        commandId: CommandId.make(
+          `command:remote-task-issue:${taskId}:${issue === undefined ? "clear" : issue.cause}:${issue?.firstSeenAt ?? issue?.message ?? "recovered"}`,
+        ),
+        parentThreadId: sourceThreadId,
+        taskId: NodeId.make(taskId),
+        ...(issue === undefined ? {} : { issue }),
+      })
+      .pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Unable to report a follower sandbox issue to its task.", {
+            sourceThreadId,
+            taskId,
+            cause,
+          }),
+        ),
+      );
+
+  const reportedIssues = new Map<
+    string,
+    {
+      readonly sourceThreadId: ThreadId;
+      readonly taskId: string;
+      readonly issue: ManagedCloudSandboxIssue;
+    }
+  >();
+  const reportIssues = Effect.fn("CloudSandboxWorkspaces.reportIssues")(function* () {
+    const resources = yield* manager.list.pipe(
+      Effect.mapError((cause) => failure(`Unable to list the managed sandboxes: ${cause.message}`)),
+    );
+    // Only task-owned followers of this controller have a card to tell here;
+    // the host id was re-derived at bind, so the owner cannot name another.
+    const failing = new Map<
+      string,
+      {
+        readonly sourceThreadId: ThreadId;
+        readonly taskId: string;
+        readonly issue: ManagedCloudSandboxIssue;
+      }
+    >();
+    for (const resource of resources) {
+      const { owner } = resource;
+      if (
+        owner._tag !== "task" ||
+        owner.hostEnvironmentId !== resource.controllerEnvironmentId ||
+        resource.issue === undefined
+      ) {
+        continue;
+      }
+      failing.set(`${owner.sourceThreadId}\u0000${owner.taskId}`, {
+        sourceThreadId: owner.sourceThreadId,
+        taskId: owner.taskId,
+        issue: resource.issue,
+      });
+    }
+    for (const [key, next] of failing) {
+      const previous = reportedIssues.get(key);
+      const issue =
+        previous !== undefined &&
+        previous.issue.cause === next.issue.cause &&
+        previous.issue.driverKind === next.issue.driverKind &&
+        previous.issue.profileId === next.issue.profileId
+          ? // The cause stands; only its wording may have changed.
+            { ...next.issue, firstSeenAt: previous.issue.firstSeenAt }
+          : next.issue;
+      reportedIssues.set(key, { ...next, issue });
+      if (sameIssue(previous?.issue, issue)) continue;
+      // A settled card would refuse the report every tick; track it no longer,
+      // since a terminal card ignores issues anyway.
+      const read = yield* threads
+        .getThreadRecords(next.sourceThreadId, ["subagents"], {
+          subagentIds: [NodeId.make(next.taskId)],
+        })
+        .pipe(Effect.option);
+      const task = Option.isSome(read) && read.value ? read.value.subagents.at(-1) : undefined;
+      if (task !== undefined && task.result !== null) continue;
+      yield* tellTask(next.sourceThreadId, next.taskId, issue);
+    }
+    for (const [key, told] of reportedIssues) {
+      if (failing.has(key)) continue;
+      reportedIssues.delete(key);
+      yield* tellTask(told.sourceThreadId, told.taskId, undefined);
+    }
+    return failing.size;
+  });
   const every = <A, E>(interval: Duration.Input, tick: Effect.Effect<A, E>, stopped: string) =>
     tick.pipe(
       Effect.ignore,
@@ -956,6 +1076,7 @@ export const make = Effect.gen(function* () {
     ),
     sweep: sweepOnce(),
     repointLinks: repointLinks(),
+    reportIssues: reportIssues(),
     /**
      * Reclaim-safe on failure: a sweep that cannot read the journal tries
      * again at the next tick. Link repointing retries each minute because the
@@ -966,6 +1087,7 @@ export const make = Effect.gen(function* () {
         [
           every("30 minutes", sweepOnce(), "Cloud workspace sweep stopped."),
           every("1 minute", repointLinks(), "Cloud workspace link repointing stopped."),
+          every("30 seconds", reportIssues(), "Cloud sandbox issue reporting stopped."),
         ],
         { discard: true },
       ),

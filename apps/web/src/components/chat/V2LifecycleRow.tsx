@@ -421,6 +421,7 @@ function SubagentTimelineLink(props: {
     (thread) => thread?.projection.subagents.find((agent) => agent.id === props.subagentId) ?? null,
   );
   const remote = props.remote ?? agent?.remoteChild;
+  const sandboxIssue = remote?.sandboxIssue;
   const remoteEnvironment = useEnvironment(remote?.environmentId ?? null);
   const navigate = useNavigate();
   const threadId = props.threadId;
@@ -465,7 +466,14 @@ function SubagentTimelineLink(props: {
             {props.title}
           </span>
           {remote !== undefined ? (
-            <span className="shrink-0 text-xs text-muted-foreground">on {remote.label}</span>
+            <span
+              className={cn(
+                "shrink-0 text-xs",
+                sandboxIssue !== undefined ? "text-warning" : "text-muted-foreground",
+              )}
+            >
+              {sandboxIssue !== undefined ? `on ${remote.label} · issue` : `on ${remote.label}`}
+            </span>
           ) : null}
         </span>
         <span
@@ -577,6 +585,7 @@ function SubagentTimelineTooltip(
       status={props.status}
       result={props.result}
       progress={props.progress}
+      sandboxIssue={props.remote?.sandboxIssue}
       parentThread={parent}
       childThread={child}
       parentProject={parentProject ?? undefined}
