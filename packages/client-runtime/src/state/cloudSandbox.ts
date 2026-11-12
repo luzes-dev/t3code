@@ -10,7 +10,7 @@ import type { HttpClient } from "effect/http";
 import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
-import { Atom } from "effect/reactivity";
+import { AsyncResult, Atom } from "effect/reactivity";
 
 import {
   deleteManagedSandbox as deleteControllerSandbox,
@@ -80,6 +80,29 @@ export function countRunningCloudSandboxes(
       resource.phase !== "stopped" &&
       resource.phase !== "failed",
   ).length;
+}
+
+/**
+ * Owner-derived selectability: a user-owned resource is an environment the
+ * user picked, while thread and task owned followers are the private compute
+ * of their controller host's delegated work, so pickers and selectable
+ * counts skip them; controller administration views keep them listed.
+ */
+export function isSelectableEnvironment(resource: ManagedCloudSandboxResource): boolean {
+  return resource.owner._tag === "user";
+}
+
+/** Registered environment ids a picker may offer, derived from the record owner. */
+export function selectableEnvironmentIds(
+  resources: readonly ManagedCloudSandboxResource[],
+): ReadonlySet<EnvironmentId> {
+  const selectable = new Set<EnvironmentId>();
+  for (const resource of resources) {
+    if (resource.owner._tag === "user" && resource.environmentId !== null) {
+      selectable.add(resource.environmentId);
+    }
+  }
+  return selectable;
 }
 
 /** Stop and resume are offered only in these phases; resume for a stopped sandbox. */
@@ -169,6 +192,13 @@ export function createManagedSandboxAtoms<R, E>(
       )
       .pipe(Atom.setIdleTTL(0)),
   );
+  // Pickers and selectable environment counts read this view; the full list
+  // stays available for controller administration surfaces.
+  const selectable = Atom.family((controllerEnvironmentId: EnvironmentId) =>
+    Atom.map(list(controllerEnvironmentId), (result) =>
+      AsyncResult.map(result, (resources) => resources.filter(isSelectableEnvironment)),
+    ),
+  );
   const remove = createRuntimeCommand(runtime, {
     label: "environment-data:cloud-sandbox:delete-managed",
     execute: Effect.fn("clientRuntime.cloudSandbox.deleteManagedSandboxCommand")(function* (input: {
@@ -178,5 +208,5 @@ export function createManagedSandboxAtoms<R, E>(
       return yield* deleteControllerSandbox(input.controllerEnvironmentId, input.resourceId);
     }),
   });
-  return { list, remove };
+  return { list, selectable, remove };
 }

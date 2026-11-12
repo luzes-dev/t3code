@@ -87,6 +87,8 @@ export const cloudSandboxStatusAtom = Atom.family((environmentId: EnvironmentId)
 
 const managedSandboxes = createManagedSandboxAtoms(connectionAtomRuntime);
 export const managedSandboxesAtom = managedSandboxes.list;
+// Pickers read this owner-derived view; the full list stays for admin surfaces.
+export const selectableManagedSandboxesAtom = managedSandboxes.selectable;
 export const deleteManagedSandbox = managedSandboxes.remove;
 export const cloudSandboxRecordingAtom = Atom.family((environmentId: EnvironmentId) =>
   connectionAtomRuntime

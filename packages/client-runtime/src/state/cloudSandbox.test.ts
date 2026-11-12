@@ -2,6 +2,7 @@ import {
   EnvironmentId,
   ManagedCloudSandboxResourceId,
   SandboxProfileId,
+  ThreadId,
   type CloudSandboxProfileStatus,
   type ManagedCloudSandboxResource,
 } from "@t3tools/contracts";
@@ -16,8 +17,10 @@ import {
   countRunningCloudSandboxes,
   describeCloudSandbox,
   describeCloudSandboxProfile,
+  isSelectableEnvironment,
   offersCloudSandboxControl,
   parseSandboxProfileLimits,
+  selectableEnvironmentIds,
 } from "./cloudSandbox.ts";
 
 const profileStatus = (overrides: {
@@ -55,6 +58,8 @@ const resource = (overrides: {
   readonly phase: ManagedCloudSandboxResource["phase"];
   readonly profileId?: string;
   readonly sandboxId?: string | null;
+  readonly owner?: ManagedCloudSandboxResource["owner"];
+  readonly environmentId?: ManagedCloudSandboxResource["environmentId"];
 }): ManagedCloudSandboxResource => ({
   resourceId: ManagedCloudSandboxResourceId.make(overrides.id),
   controllerEnvironmentId: EnvironmentId.make("controller"),
@@ -62,12 +67,57 @@ const resource = (overrides: {
   profileId: SandboxProfileId.make(overrides.profileId ?? "boat-main"),
   sandboxId: overrides.sandboxId === undefined ? "sbx-1" : overrides.sandboxId,
   parentResourceId: null,
-  owner: { _tag: "user" },
-  retention: "manual",
+  owner: overrides.owner ?? ({ _tag: "user" } as const),
+  retention:
+    overrides.owner === undefined || overrides.owner._tag === "user"
+      ? ("manual" as const)
+      : ("stop-and-retain" as const),
   phase: overrides.phase,
-  environmentId: null,
+  environmentId: overrides.environmentId ?? null,
   label: overrides.id,
   recordingIds: [],
+});
+
+describe("selectable environments", () => {
+  it("selects user-owned resources and skips thread and task followers", () => {
+    const user = resource({ id: "main", phase: "connected" });
+    const threadFollower = resource({
+      id: "thread-follower",
+      phase: "connected",
+      owner: {
+        _tag: "thread",
+        hostEnvironmentId: EnvironmentId.make("controller"),
+        threadId: ThreadId.make("thread-1"),
+      },
+      environmentId: EnvironmentId.make("env-thread"),
+    });
+    const taskFollower = resource({
+      id: "task-follower",
+      phase: "connected",
+      owner: {
+        _tag: "task",
+        hostEnvironmentId: EnvironmentId.make("controller"),
+        sourceThreadId: ThreadId.make("thread-1"),
+        taskId: "task-1",
+      },
+      environmentId: EnvironmentId.make("env-task"),
+    });
+    expect(isSelectableEnvironment(user)).toBe(true);
+    expect(isSelectableEnvironment(threadFollower)).toBe(false);
+    expect(isSelectableEnvironment(taskFollower)).toBe(false);
+    expect(selectableEnvironmentIds([user, threadFollower, taskFollower])).toEqual(new Set());
+    // A registered user-owned environment is offered; followers never are,
+    // even when their sandbox is running.
+    const registeredUserEnvironment = EnvironmentId.make("env-main");
+    const registered = resource({
+      id: "main",
+      phase: "connected",
+      environmentId: registeredUserEnvironment,
+    });
+    expect(selectableEnvironmentIds([registered, taskFollower])).toEqual(
+      new Set([registeredUserEnvironment]),
+    );
+  });
 });
 
 describe("describeCloudSandboxProfile", () => {
