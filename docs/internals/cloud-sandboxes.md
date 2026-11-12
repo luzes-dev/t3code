@@ -48,6 +48,12 @@ delegated child. Settings collapse per-controller issues by
 profile (one fix: re-login on that profile), while per-resource rows keep the
 individual detail.
 
+The follow loop itself is bounded: an unreachable linked environment is
+retried with back-off for 10 minutes (or 40 attempts, so stubbed schedules
+exhaust the same way); past that its task completes failed here with the
+unreachable wording instead of following forever. Until then the card shows
+the durably stamped issue.
+
 ## Behavior matrix
 
 | Behavior                                             | Persistent (`user`)                  | Follower (`thread`/`task`)                                                                                                                                                                                                                                                                                                         |

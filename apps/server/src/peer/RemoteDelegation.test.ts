@@ -1882,6 +1882,43 @@ it.effect("a parent stopped while the box is unreachable still stops its task th
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
+it.effect("a follower whose box never comes back fails its task after the retry budget", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const thread = yield* makeBoxThread;
+      const b = yield* serveBox(thread);
+      const offers = yield* SubscriptionRef.make<
+        ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+      >([]);
+      const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+      const retries = yield* steppedRetries;
+      const a = yield* makeLaptop(database, offers).pipe(
+        Effect.provideService(RemoteDelegation.FollowRetrySchedule, retries.schedule),
+      );
+      yield* linkTo(a.links, b, "full-access");
+      yield* seedParent(a);
+      // The box sleeps as soon as the task is there and never wakes.
+      yield* Ref.set(
+        thread.afterLaunch,
+        Ref.set(b.descriptor, descriptorOf("environment-elsewhere", "Elsewhere")),
+      );
+      const delegated = yield* delegateToBox(a);
+      // The first failure parks the follower on its retry schedule.
+      yield* Queue.take(retries.failed);
+      // Offer past the 40-attempt bound; the retries run through and the
+      // follower gives up, failing the task here instead of following forever.
+      for (let attempt = 0; attempt < 45; attempt++) {
+        yield* Queue.offer(retries.retry, undefined);
+      }
+      expect(yield* taskResult(a, delegated.taskId)).toMatchObject({
+        status: "failed",
+        result:
+          "The linked environment stayed unreachable for 10 minutes; the task's result there was never delivered.",
+      });
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
 it.effect("a task cancelled while the box is unreachable is stopped there after a restart", () =>
   Effect.scoped(
     Effect.gen(function* () {

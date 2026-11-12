@@ -50,6 +50,13 @@ import * as PeerLinks from "./PeerLinks.ts";
 const FOLLOW_WAIT_MS = 10 * 60 * 1_000;
 /** A linked environment that stops answering is retried, backing off to this. */
 const FOLLOW_MAX_BACKOFF = Duration.minutes(5);
+/**
+ * How long a follower keeps retrying an unreachable linked environment before it
+ * fails its task here instead of waiting forever: the same horizon as one wait.
+ */
+const FOLLOW_UNREACHABLE_MS = FOLLOW_WAIT_MS;
+/** The attempt count beside the duration, so stubbed retry schedules exhaust too. */
+const FOLLOW_MAX_ATTEMPTS = 40;
 /** How a follower retries; tests step it by hand. */
 export const FollowRetrySchedule = Context.Reference<Schedule.Schedule<unknown>>(
   "t3/peer/RemoteDelegation/FollowRetrySchedule",
@@ -561,9 +568,8 @@ const make = Effect.gen(function* () {
 
   /**
    * Waits for the task's run there to end, completes the task here, and stops it there if it
-   * ended here first. A revoked, expired or forgotten link, or a thread or run gone there,
-   * fails the task with nothing left to stop; anything else (the other machine asleep, a
-   * dropped route) is retried with back-off, and so is completing.
+   * ended here first. A revoked/missing link or thread there fails it; the rest retried with
+   * back-off, bounded — an environment unreachable past the retry budget fails its task here.
    */
   const follow = (parentThreadId: ThreadId, taskId: NodeId): Effect.Effect<void> =>
     followOnce(parentThreadId, taskId).pipe(
@@ -579,7 +585,26 @@ const make = Effect.gen(function* () {
           yield* complete(parentThreadId, taskId, "failed", reason, "stopped", stopCount);
         }),
       }),
-      Effect.retry(followRetry),
+      Effect.retry(
+        Schedule.upTo(followRetry, {
+          duration: FOLLOW_UNREACHABLE_MS,
+          times: FOLLOW_MAX_ATTEMPTS,
+        }),
+      ),
+      Effect.catchTags({
+        OrchestratorMcpFailure: Effect.fn("RemoteDelegation.followUnreachable")(function* () {
+          const { task } = yield* readTask(parentThreadId, taskId);
+          if (task === undefined || task.result !== null) return;
+          yield* complete(
+            parentThreadId,
+            taskId,
+            "failed",
+            "The linked environment stayed unreachable for 10 minutes; the task's result there was never delivered.",
+            "stopped",
+            task.remoteChild?.stopCount,
+          );
+        }),
+      }),
       Effect.ignoreCause({ log: true }),
     );
 

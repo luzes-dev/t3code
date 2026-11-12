@@ -3,6 +3,7 @@ import {
   deriveWorkflowGroups,
   projectedSubagentsToRuntime,
 } from "@t3tools/client-runtime/state/subagentRuntime";
+import { describeManagedCloudSandboxIssue } from "@t3tools/client-runtime/state/cloudSandbox";
 import type { ThreadTurnSubagents } from "@t3tools/client-runtime/state/thread-subagents";
 import {
   isOrchestrationV2WorkActive,
@@ -164,7 +165,11 @@ function AgentRow(props: {
         accessibilityHint={
           subagent.remoteChild === undefined
             ? "Provider-managed agent. Its work appears in the transcript."
-            : `Runs on ${subagent.remoteChild.label}. Connect to it to open its thread.`
+            : `Runs on ${subagent.remoteChild.label}. Connect to it to open its thread.${
+                subagent.remoteChild.sandboxIssue === undefined
+                  ? ""
+                  : ` ${describeManagedCloudSandboxIssue(subagent.remoteChild.sandboxIssue)}`
+              }`
         }
       >
         {row}
