@@ -1,6 +1,8 @@
 import * as WorktreeMcpService from "./mcp/WorktreeMcpService.ts";
 import * as CloudSandboxController from "./workspace/CloudSandboxController.ts";
 import * as CloudSandboxProfiles from "./cloudSandbox/CloudSandboxProfiles.ts";
+import * as FollowerHostSettings from "./cloudSandbox/FollowerHostSettingsLedger.ts";
+import * as FollowerSettingsSync from "./cloudSandbox/FollowerSettingsSync.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import * as ManagedCloudSandboxRoutes from "./cloudSandbox/ManagedCloudSandboxRoutes.ts";
 import * as CloudSandboxPreview from "./cloudSandbox/CloudSandboxPreview.ts";
@@ -785,6 +787,22 @@ const layerCommandReadiness = HttpRouter.middleware(
   { global: true },
 );
 
+// Follower settings inheritance: the controller approves one inheritable
+// snapshot revision per host save; followers pull it over the existing source
+// channel. Both starts no-op where they do not apply.
+const layerFollowerSettings = Layer.mergeAll(
+  FollowerHostSettings.layer,
+  FollowerSettingsSync.layer.pipe(Layer.provide(CloudSandboxController.layer)),
+);
+const layerFollowerSettingsRuntime = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const ledger = yield* FollowerHostSettings.FollowerHostSettingsLedger;
+    yield* ledger.start;
+    const sync = yield* FollowerSettingsSync.FollowerSettingsSync;
+    yield* sync.start;
+  }),
+).pipe(Layer.provide(layerFollowerSettings));
+
 const layerMakeRoutes = Layer.mergeAll(
   Layer.mergeAll(
     HttpApiBuilder.layer(EnvironmentHttpApi).pipe(
@@ -830,7 +848,15 @@ const layerMakeRoutes = Layer.mergeAll(
     PullRequestReviewGuideService.layer.pipe(Layer.provide(PullRequestReviewGuides.layer)),
   ),
   Layer.provide(WorktreeMcpService.layer),
-  Layer.provide(CloudSandboxWorkspaces.layer.pipe(Layer.provide(CloudSandboxController.layer))),
+  Layer.provide(
+    Layer.mergeAll(
+      CloudSandboxWorkspaces.layer,
+      // Follower settings inheritance: the controller approves one inheritable
+      // snapshot revision per host save; followers pull it over the existing
+      // source channel. Both starts no-op where they do not apply.
+      layerFollowerSettingsRuntime,
+    ).pipe(Layer.provide(CloudSandboxController.layer)),
+  ),
   // provideRequest builds in a forked memo map that only reuses what the parent already holds,
   // so the manager and profiles below must be provided after it to stay single instances.
   HttpRouter.provideRequest(

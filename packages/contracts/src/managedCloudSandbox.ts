@@ -1,6 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { EnvironmentId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { EnvironmentId, PositiveInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import {
   CloudSandboxCapabilities,
   CloudSandboxDetails,
@@ -204,8 +204,19 @@ export const ManagedCloudSandboxSourceOperation = Schema.Union([
     owner: Schema.Union([ManagedSandboxOwner.members[1], ManagedSandboxOwner.members[2]]),
     retention: Schema.optionalKey(ManagedSandboxRetention),
   }),
+  // A follower pulls the controller's approved inheritable settings; the
+  // controller classifies every field against its allowlist before answering.
+  Schema.TaggedStruct("hostSettings", {}),
 ]);
 export type ManagedCloudSandboxSourceOperation = typeof ManagedCloudSandboxSourceOperation.Type;
+
+/** Approved controller settings for followers: only allowlisted, non-default
+ * fields, at one monotonically increasing revision issued per host change. */
+export const FollowerHostSettingsSnapshot = Schema.Struct({
+  revision: PositiveInt,
+  fields: Schema.Record(Schema.String, Schema.Json),
+});
+export type FollowerHostSettingsSnapshot = typeof FollowerHostSettingsSnapshot.Type;
 
 export const ManagedCloudSandboxSourceResult = Schema.Union([
   Schema.TaggedStruct("connection", {
@@ -215,5 +226,6 @@ export const ManagedCloudSandboxSourceResult = Schema.Union([
   Schema.TaggedStruct("resource", { resource: ManagedCloudSandboxResource }),
   Schema.TaggedStruct("result", { result: ManagedCloudSandboxControlResult }),
   Schema.TaggedStruct("deleted", {}),
+  Schema.TaggedStruct("hostSettings", { snapshot: FollowerHostSettingsSnapshot }),
 ]);
 export type ManagedCloudSandboxSourceResult = typeof ManagedCloudSandboxSourceResult.Type;

@@ -20,6 +20,7 @@ import type {
 } from "@t3tools/contracts";
 import * as Profiles from "./CloudSandboxProfiles.ts";
 import * as Store from "./CloudSandboxStore.ts";
+import * as FollowerHostSettings from "./FollowerHostSettingsLedger.ts";
 import * as Transport from "./CloudSandboxTransport.ts";
 import { makeAllocation } from "./ManagerAllocation.ts";
 import { makeConnections } from "./ManagerConnections.ts";
@@ -113,7 +114,12 @@ export const make = Effect.gen(function* () {
   const { route, connect, disconnect, sourceContext } = connections;
   const allocation = makeAllocation(rt, connections);
   const { provision, fork, release } = allocation;
-  const control = makeControl(rt, connections, allocation);
+  // Optionally wired: only controllers provide the ledger layer; fixtures and
+  // non-managed servers answer the source op with a typed ledger error.
+  const followerHostSettings = Option.getOrUndefined(
+    yield* Effect.serviceOption(FollowerHostSettings.FollowerHostSettingsLedger),
+  );
+  const control = makeControl(rt, connections, allocation, followerHostSettings);
   const { execute, artifact, executeSource, bindOwnerLocked } = control;
   const { reconcile } = makeReconciler(rt, connections, allocation);
   yield* reconcile.pipe(

@@ -15,14 +15,22 @@ import {
   type ManagedSandboxRetention,
 } from "@t3tools/contracts";
 import * as Store from "./CloudSandboxStore.ts";
+import * as FollowerHostSettings from "./FollowerHostSettingsLedger.ts";
 import { isDeletedOrDeleting, toError, type ManagerRuntime } from "./ManagerRuntime.ts";
 import type { ManagerAllocation } from "./ManagerAllocation.ts";
 import type { ManagerConnections } from "./ManagerConnections.ts";
+
+const toManagerLedgerError = (cause: FollowerHostSettings.FollowerHostSettingsLedgerError) =>
+  new Store.CloudSandboxManagerError({
+    reason: cause.reason === "storage" ? "storage" : "ledger",
+    cause,
+  });
 
 export const makeControl = (
   rt: ManagerRuntime,
   connections: ManagerConnections,
   allocation: ManagerAllocation,
+  followerHostSettings: FollowerHostSettings.FollowerHostSettingsLedger["Service"] | undefined,
 ) => {
   const {
     renewalsEnabled,
@@ -288,6 +296,17 @@ export const makeControl = (
         yield* requireOwnedChild(operation.resourceId);
         yield* release(operation.resourceId);
         return { _tag: "deleted" };
+      case "hostSettings": {
+        if (followerHostSettings === undefined)
+          return yield* new Store.CloudSandboxManagerError({
+            reason: "ledger",
+            cause: new Error("This controller has no follower settings ledger."),
+          });
+        return {
+          _tag: "hostSettings",
+          snapshot: yield* followerHostSettings.current.pipe(Effect.mapError(toManagerLedgerError)),
+        };
+      }
       case "bindOwner": {
         // A child may bind only its own fork, and only to an owner hosted on
         // this controller derived from the authenticating resource's identity:

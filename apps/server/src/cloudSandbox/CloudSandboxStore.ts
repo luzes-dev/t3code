@@ -20,6 +20,7 @@ export class CloudSandboxManagerError extends Schema.TaggedError<CloudSandboxMan
       "storage",
       "budget",
       "concurrency",
+      "ledger",
     ]),
     cause: Schema.optionalKey(Schema.Defect()),
     rateLimit: Schema.optionalKey(
@@ -53,6 +54,8 @@ export class CloudSandboxManagerError extends Schema.TaggedError<CloudSandboxMan
         return "The profile's monthly cloud budget refused this operation: the limit is reached, or the cost cannot be confirmed.";
       case "concurrency":
         return "The profile's concurrent sandbox limit is reached.";
+      case "ledger":
+        return "The controller has not approved follower settings yet.";
     }
   }
 }
