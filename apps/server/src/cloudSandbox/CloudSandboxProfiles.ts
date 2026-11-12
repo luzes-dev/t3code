@@ -35,6 +35,8 @@ const Payload = Schema.Struct({
       period: Schema.String,
       usd: Schema.Number,
       resourceIds: Schema.Array(Schema.String),
+      /** Controller hosts that follower spend lines attribute to, with no usd effect. */
+      attributedResourceIds: Schema.optionalKey(Schema.Array(Schema.String)),
     }),
   ),
 });
@@ -70,6 +72,8 @@ export class CloudSandboxProfiles extends Context.Service<
       profileId: SandboxProfileId,
       resourceId: string,
       usd: number,
+      /** The controller host a follower resource's spend line attributes to. */
+      attributedTo?: string,
     ) => Effect.Effect<CloudSandboxProfileSpend, CloudSandboxProfileError>;
     readonly spendOf: (
       profileId: SandboxProfileId,
@@ -84,6 +88,10 @@ const isCloudSandboxProfileError = Schema.is(CloudSandboxProfileError);
 
 const storage = (cause: unknown): CloudSandboxProfileError =>
   isCloudSandboxProfileError(cause) ? cause : new CloudSandboxProfileError({ reason: "storage" });
+
+const attributionOf = (
+  current: { readonly attributedResourceIds?: readonly string[] } | undefined,
+) => current?.attributedResourceIds ?? [];
 
 const runningCount = (
   profileId: SandboxProfileId,
@@ -191,6 +199,7 @@ const make = Effect.gen(function* () {
     profileId: SandboxProfileId,
     resourceId: string,
     usd: number,
+    attributedTo?: string,
   ) {
     const found = yield* load(profileId);
     if (Option.isNone(found)) return yield* new CloudSandboxProfileError({ reason: "not-found" });
@@ -200,10 +209,29 @@ const make = Effect.gen(function* () {
     const baseUsd =
       current !== undefined && Number.isFinite(current.usd) && current.usd > 0 ? current.usd : 0;
     const deltaUsd = Number.isFinite(usd) && usd > 0 ? usd : 0;
-    const spend = counted.includes(resourceId)
-      ? { period, usd: baseUsd, resourceIds: counted }
-      : { period, usd: baseUsd + deltaUsd, resourceIds: [...counted, resourceId] };
-    if (!counted.includes(resourceId)) {
+    // The contributing resource guards the amount, so the same line never
+    // adds twice; the controller host id is attribution, not extra spend.
+    const attributed = attributionOf(current);
+    const attributionSet =
+      attributedTo === undefined ? attributed : [...new Set([...attributed, attributedTo])];
+    const contributionChanged = !counted.includes(resourceId);
+    const attributionChanged =
+      attributionSet.length !== attributed.length ||
+      attributionSet.some((id, i) => id !== attributed[i]);
+    const spend = contributionChanged
+      ? {
+          period,
+          usd: baseUsd + deltaUsd,
+          resourceIds: [...counted, resourceId],
+          ...(attributionSet.length > 0 ? { attributedResourceIds: attributionSet } : {}),
+        }
+      : {
+          period,
+          usd: baseUsd,
+          resourceIds: counted,
+          ...(attributionSet.length > 0 ? { attributedResourceIds: attributionSet } : {}),
+        };
+    if (contributionChanged || attributionChanged) {
       const payload: typeof Payload.Type = { ...found.value, spend };
       yield* sql`
         INSERT INTO sandbox_profiles(profile_id, payload_json)
@@ -274,8 +302,9 @@ const make = Effect.gen(function* () {
       if (apiKey === "") return yield* new CloudSandboxProfileError({ reason: "missing-key" });
       return { profile: found.value.profile, apiKey };
     }),
-    recordSpend: Effect.fn("CloudSandboxProfiles.recordSpend")((profileId, resourceId, usd) =>
-      writes.withPermits(1)(recordSpendUnlocked(profileId, resourceId, usd)),
+    recordSpend: Effect.fn("CloudSandboxProfiles.recordSpend")(
+      (profileId, resourceId, usd, attributedTo) =>
+        writes.withPermits(1)(recordSpendUnlocked(profileId, resourceId, usd, attributedTo)),
     ),
     spendOf,
     test: Effect.fn("CloudSandboxProfiles.test")(function* (input: CloudSandboxProfileTestInput) {

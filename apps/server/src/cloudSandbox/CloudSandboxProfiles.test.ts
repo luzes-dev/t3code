@@ -132,3 +132,41 @@ it.effect("resets monthly spend at the period boundary", () =>
     expect((yield* profiles.recordSpend(profileId, "b", 2)).usd).toBe(2);
   }).pipe(Effect.provide(layer), Effect.scoped),
 );
+
+it.effect("attributes a follower's spend to its controller host without double counting", () =>
+  Effect.gen(function* () {
+    const profiles = yield* Profiles.CloudSandboxProfiles;
+    const sql = yield* SqlClient.SqlClient;
+    yield* profiles.save({ ...input, apiKey: "working-key" });
+    const storedSpend = () =>
+      sql<{ payload_json: string }>`
+        SELECT payload_json FROM sandbox_profiles WHERE profile_id = ${profileId}
+      `.pipe(
+        Effect.map(
+          (rows) =>
+            JSON.parse(rows[0]!.payload_json).spend as {
+              usd: number;
+              resourceIds: string[];
+              attributedResourceIds?: string[];
+            },
+        ),
+      );
+    // The follower's release records one line: the amount lands once under the
+    // follower's own id, and the host id carries only the attribution.
+    yield* profiles.recordSpend(profileId, "follower", 5, "host");
+    const first = yield* storedSpend();
+    expect(first.usd).toBe(5);
+    expect(first.resourceIds).toEqual(["follower"]);
+    expect(first.attributedResourceIds).toEqual(["host"]);
+    // A repeated release of the same follower adds no amount and no duplicate.
+    yield* profiles.recordSpend(profileId, "follower", 5, "host");
+    const again = yield* storedSpend();
+    expect(again.usd).toBe(5);
+    expect(again.resourceIds).toEqual(["follower"]);
+    expect(again.attributedResourceIds).toEqual(["host"]);
+    // The controller host's own release is its own contributing line.
+    expect((yield* profiles.recordSpend(profileId, "host", 2)).usd).toBe(7);
+    const final = yield* storedSpend();
+    expect(final.resourceIds.sort()).toEqual(["follower", "host"]);
+  }).pipe(Effect.provide(layer), Effect.scoped),
+);

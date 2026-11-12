@@ -349,7 +349,14 @@ export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnectio
             Number.isFinite(record.finalSpendUsd)
           )
             yield* profiles
-              .recordSpend(record.profileId, record.resourceId, record.finalSpendUsd)
+              // A follower's VM spend stays its own per-resource line and is
+              // attributed once to its controller host, never twice.
+              .recordSpend(
+                record.profileId,
+                record.resourceId,
+                record.finalSpendUsd,
+                record.parentResourceId ?? undefined,
+              )
               .pipe(Effect.mapError(toManagerError));
           yield* store.save({ ...record, lifecycle: "deleted", snapshotName: null });
           yield* secrets.remove(`cloud-source-${id}`).pipe(Effect.mapError(toError));
