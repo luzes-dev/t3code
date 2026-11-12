@@ -9,12 +9,14 @@ import {
   type ManagedCloudSandboxIssue,
   type ManagedCloudSandboxResource,
   type Project,
+  ProviderDriverKind,
   ProviderInstanceId,
   SandboxProfileId,
   ThreadId,
   WorktreeMcpFailure,
   NodeId,
   OrchestratorMcpFailure,
+  type OrchestrationV2Subagent,
   type OrchestrationV2StoredEvent,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -26,6 +28,7 @@ import { idleThreadProjection, liveThreadShell } from "../mcp/McpToolAccess.test
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Sqlite from "../persistence/Sqlite.ts";
 import * as Threads from "../orchestration-v2/ThreadManagementService.ts";
 import * as Projects from "../project/ProjectService.ts";
@@ -58,6 +61,46 @@ const scope: McpThreadInvocationScope = {
   capabilities: new Set(["orchestration", "worktree"]),
   client: undefined,
 };
+
+// Deterministic ids: the reporter's command ids must not repeat, but tests
+// never assert them, so one filler byte is enough for every uuid it requests.
+const randomLayer = Layer.succeed(
+  SecureRandom.SecureRandom,
+  SecureRandom.make((size) => new Uint8Array(size).fill(8)),
+);
+
+/** A running app-owned task card as the reporter reads it, optionally degraded. */
+const remoteTaskCard = (sandboxIssue?: ManagedCloudSandboxIssue): OrchestrationV2Subagent => ({
+  id: NodeId.make("task-1"),
+  threadId: ThreadId.make("owner"),
+  runId: null,
+  parentNodeId: NodeId.make("node-1"),
+  origin: "app_owned",
+  createdBy: "agent",
+  driver: ProviderDriverKind.make("boat"),
+  providerInstanceId: ProviderInstanceId.make("codex"),
+  providerThreadId: null,
+  childThreadId: null,
+  ...(sandboxIssue === undefined
+    ? {}
+    : {
+        remoteChild: {
+          environmentId: EnvironmentId.make("environment:box"),
+          threadId: ThreadId.make("thread-on-the-box"),
+          label: "Box",
+          sandboxIssue,
+        },
+      }),
+  nativeTaskRef: null,
+  prompt: "Run the suite there.",
+  title: null,
+  model: null,
+  status: "running",
+  result: null,
+  startedAt: null,
+  completedAt: null,
+  updatedAt: DateTime.makeUnsafe("2026-01-01T00:00:00.000Z"),
+});
 
 it.effect.each([true, false])(
   "keeps failed deletion journaled and retries on either host (in sandbox: %s)",
@@ -138,7 +181,11 @@ it.effect.each([true, false])(
       expect(deletions).toBe(2);
     }).pipe(
       Effect.provide(
-        Workspaces.layer.pipe(Layer.provideMerge(context), Layer.provide(NodeServices.layer)),
+        Workspaces.layer.pipe(
+          Layer.provideMerge(context),
+          Layer.provideMerge(randomLayer),
+          Layer.provide(NodeServices.layer),
+        ),
       ),
       Effect.scoped,
     );
@@ -207,7 +254,11 @@ it.effect.each([false, true])("runs child setup once across retries (failure: %s
     expect(starts).toBe(1);
   }).pipe(
     Effect.provide(
-      Workspaces.layer.pipe(Layer.provideMerge(context), Layer.provide(NodeServices.layer)),
+      Workspaces.layer.pipe(
+        Layer.provideMerge(context),
+        Layer.provideMerge(randomLayer),
+        Layer.provide(NodeServices.layer),
+      ),
     ),
     Effect.scoped,
   );
@@ -276,6 +327,7 @@ it.effect("checks the real source gate before allocation and propagates child co
         Layer.provideMerge(context),
         Layer.provideMerge(layerLinkingEnvironment(descriptorOf("source", "Source"))),
         Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-workspace-gate-" })),
+        Layer.provideMerge(randomLayer),
         Layer.provide(NodeServices.layer),
       ),
     ),
@@ -503,7 +555,11 @@ it.effect.each([
     expect(rows[0]?.payload_json.includes('"phase":"deleted"')).toBe(scenario.reclaimed === 1);
   }).pipe(
     Effect.provide(
-      Workspaces.layer.pipe(Layer.provideMerge(dependencies), Layer.provide(NodeServices.layer)),
+      Workspaces.layer.pipe(
+        Layer.provideMerge(dependencies),
+        Layer.provideMerge(randomLayer),
+        Layer.provide(NodeServices.layer),
+      ),
     ),
     Effect.scoped,
   );
@@ -1013,7 +1069,11 @@ it.effect(
       expect(unlinked).toEqual(["child-healthy"]);
     }).pipe(
       Effect.provide(
-        Workspaces.layer.pipe(Layer.provideMerge(dependencies), Layer.provide(NodeServices.layer)),
+        Workspaces.layer.pipe(
+          Layer.provideMerge(dependencies),
+          Layer.provideMerge(randomLayer),
+          Layer.provide(NodeServices.layer),
+        ),
       ),
       Effect.scoped,
     );
@@ -1280,6 +1340,7 @@ it.effect("repoints live children's links to this server's port and skips the re
     Effect.provide(
       Workspaces.layer.pipe(
         Layer.provideMerge(dependencies),
+        Layer.provideMerge(randomLayer),
         Layer.provideMerge(NodeServices.layer),
       ),
     ),
@@ -1365,7 +1426,98 @@ it.effect("reports a follower's degraded state to its task and clears it on reco
     expect(dispatches[1]?.issue).toBeUndefined();
   }).pipe(
     Effect.provide(
-      Workspaces.layer.pipe(Layer.provideMerge(context), Layer.provideMerge(NodeServices.layer)),
+      Workspaces.layer.pipe(
+        Layer.provideMerge(context),
+        Layer.provideMerge(randomLayer),
+        Layer.provideMerge(NodeServices.layer),
+      ),
+    ),
+    Effect.scoped,
+  );
+});
+
+it.effect("reconciles a card this process never told: recovery clears it", () => {
+  let listed: readonly ManagedCloudSandboxResource[] = [];
+  const dispatches: Array<{
+    readonly commandId: string;
+    readonly issue?: ManagedCloudSandboxIssue;
+  }> = [];
+  const context = Layer.mergeAll(
+    Sqlite.layerMemory,
+    ServerConfig.layerTest(process.cwd(), { prefix: "t3-sandbox-issues-redrive-" }),
+    Layer.mock(Controller.CloudSandboxController)({ available: Effect.succeed(false) }),
+    Layer.mock(Setup.ProjectSetupScriptRunner)({}),
+    Layer.mock(Threads.ThreadManagementService)({
+      getThreadRecords: () =>
+        Effect.succeed({
+          ...idleThreadProjection(liveThreadShell(ThreadId.make("owner"))),
+          subagents: [remoteTaskCard(issue)],
+        }),
+      dispatch: (
+        command: Parameters<Threads.ThreadManagementService["Service"]["dispatch"]>[0],
+      ) => {
+        if (command.type === "delegated_task.remote.issue") {
+          dispatches.push({
+            commandId: command.commandId,
+            ...(command.issue === undefined ? {} : { issue: command.issue }),
+          });
+        }
+        return Effect.succeed({ sequence: 1, storedEvents: [] });
+      },
+    }),
+    Layer.mock(Projects.ProjectService)({}),
+    Layer.mock(Links.PeerLinks)({}),
+    Layer.mock(Forwarding.PeerForwarding)({}),
+    Layer.mock(Delegation.RemoteDelegation)({}),
+    Layer.mock(Manager.CloudSandboxManager)({ list: Effect.sync(() => listed) }),
+    Layer.mock(Profiles.CloudSandboxProfiles)({ list: Effect.succeed([]) }),
+    Layer.mock(Git.GitWorkflowService)({}),
+    Layer.mock(GitDriver.GitVcsDriver)({}),
+  );
+  const issue: ManagedCloudSandboxIssue = {
+    cause: "connectivity",
+    driverKind: "boat",
+    profileId: "boat-main",
+    message: "The managed cloud connection could not be established.",
+    firstSeenAt: "2026-02-09T10:00:00Z",
+  };
+  const follower = (): ManagedCloudSandboxResource => ({
+    resourceId: ManagedCloudSandboxResourceId.make("follower-1"),
+    controllerEnvironmentId: EnvironmentId.make("source"),
+    driverKind: "boat",
+    profileId: SandboxProfileId.make("boat-main"),
+    sandboxId: "sbx-1",
+    parentResourceId: null,
+    owner: {
+      _tag: "task",
+      hostEnvironmentId: EnvironmentId.make("source"),
+      sourceThreadId: ThreadId.make("owner"),
+      taskId: "task-1",
+    },
+    retention: "stop-and-retain",
+    phase: "connected",
+    environmentId: null,
+    label: "follower",
+    recordingIds: [],
+  });
+  return Effect.gen(function* () {
+    const workspaces = yield* Workspaces.CloudSandboxWorkspaces;
+    // The follower recovered while the server was down, so this process has
+    // told nothing, yet the card still shows the recovered span.
+    listed = [follower()];
+    expect(yield* workspaces.reportIssues).toBe(0);
+    expect(dispatches).toHaveLength(1);
+    expect(dispatches[0]?.issue).toBeUndefined();
+    // The reconciled owner reports nothing further.
+    expect(yield* workspaces.reportIssues).toBe(0);
+    expect(dispatches).toHaveLength(1);
+  }).pipe(
+    Effect.provide(
+      Workspaces.layer.pipe(
+        Layer.provideMerge(context),
+        Layer.provideMerge(randomLayer),
+        Layer.provideMerge(NodeServices.layer),
+      ),
     ),
     Effect.scoped,
   );

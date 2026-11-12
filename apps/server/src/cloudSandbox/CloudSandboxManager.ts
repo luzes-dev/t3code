@@ -150,16 +150,16 @@ export const make = Effect.gen(function* () {
     sourceContext,
     executeSource,
     bindOwner: Effect.fn("CloudSandboxManager.bindOwner")((resourceId, owner, retention) =>
-      locks
-        .withLock(
-          resourceId,
-          bindOwnerLocked(resourceId, owner, rt.controllerEnvironmentId, retention),
-        )
-        .pipe(
-          // A refused bind stays user-owned until a retry or the orphan sweep;
-          // the record says so, and the workspaces reporter tells the owner's card.
+      locks.withLock(
+        resourceId,
+        // A refused bind stays user-owned until a retry or the orphan sweep; the
+        // record says so, and the workspaces reporter tells the owner's card.
+        // Stamped under the lock so a raced recovery cannot revert it to a
+        // connected record's freshly cleared issue.
+        bindOwnerLocked(resourceId, owner, rt.controllerEnvironmentId, retention).pipe(
           Effect.tapError((error) => stampBindIssue(store, resourceId, error)),
         ),
+      ),
     ),
     get: Effect.fn("CloudSandboxManager.get")((id) =>
       requireRecord(id).pipe(Effect.map(publicResource)),

@@ -25,6 +25,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 import type { ManagedSandboxFollowerOwner, ManagedSandboxRetention } from "@t3tools/contracts";
@@ -156,6 +157,7 @@ export const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const fs = yield* FileSystem.FileSystem;
   const sql = yield* SqlClient.SqlClient;
+  const random = yield* SecureRandom.SecureRandom;
   const git = yield* Git.GitWorkflowService;
   const driver = yield* GitDriver.GitVcsDriver;
   const controller = yield* Controller.CloudSandboxController;
@@ -668,30 +670,40 @@ export const make = Effect.gen(function* () {
     left.message === right.message &&
     left.firstSeenAt === right.firstSeenAt;
 
-  const tellTask = (
+  /**
+   * Reports one issue attempt as its own command, so a failed one never blocks
+   * the next. True when the card cannot need another (delivered, or refused
+   * because it already reflects the report); false when a transient failure
+   * left it possibly untold, to retry next tick.
+   */
+  const tellTask = Effect.fn("CloudSandboxWorkspaces.tellTask")(function* (
     sourceThreadId: ThreadId,
     taskId: string,
     issue: ManagedCloudSandboxIssue | undefined,
-  ) =>
-    threads
+  ) {
+    const attempt = yield* random.uuidV4();
+    return yield* threads
       .dispatch({
         type: "delegated_task.remote.issue",
-        commandId: CommandId.make(
-          `command:remote-task-issue:${taskId}:${issue === undefined ? "clear" : issue.cause}:${issue?.firstSeenAt ?? issue?.message ?? "recovered"}`,
-        ),
+        commandId: CommandId.make(`command:remote-task-issue:${taskId}:${attempt}`),
         parentThreadId: sourceThreadId,
         taskId: NodeId.make(taskId),
         ...(issue === undefined ? {} : { issue }),
       })
       .pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("Unable to report a follower sandbox issue to its task.", {
-            sourceThreadId,
-            taskId,
-            cause,
-          }),
+        Effect.as(true),
+        Effect.catch((cause) =>
+          cause._tag === "OrchestratorDispatchError" &&
+          cause.cause === "Command produced no domain events."
+            ? Effect.succeed(true)
+            : Effect.logWarning("Unable to report a follower sandbox issue to its task.", {
+                sourceThreadId,
+                taskId,
+                cause,
+              }).pipe(Effect.as(false)),
         ),
       );
+  });
 
   const reportedIssues = new Map<
     string,
@@ -701,6 +713,9 @@ export const make = Effect.gen(function* () {
       readonly issue: ManagedCloudSandboxIssue;
     }
   >();
+  // Owners whose card this process already reconciled against its resource;
+  // checked once per process, since a tick cannot see a stale card again.
+  const reconciledOwners = new Set<string>();
   const reportIssues = Effect.fn("CloudSandboxWorkspaces.reportIssues")(function* () {
     const resources = yield* manager.list.pipe(
       Effect.mapError((cause) => failure(`Unable to list the managed sandboxes: ${cause.message}`)),
@@ -715,33 +730,30 @@ export const make = Effect.gen(function* () {
         readonly issue: ManagedCloudSandboxIssue;
       }
     >();
+    const healthy = new Map<
+      string,
+      {
+        readonly sourceThreadId: ThreadId;
+        readonly taskId: string;
+      }
+    >();
     for (const resource of resources) {
       const { owner } = resource;
-      if (
-        owner._tag !== "task" ||
-        owner.hostEnvironmentId !== resource.controllerEnvironmentId ||
-        resource.issue === undefined
-      ) {
+      if (owner._tag !== "task" || owner.hostEnvironmentId !== resource.controllerEnvironmentId) {
         continue;
       }
-      failing.set(`${owner.sourceThreadId}\u0000${owner.taskId}`, {
-        sourceThreadId: owner.sourceThreadId,
-        taskId: owner.taskId,
-        issue: resource.issue,
-      });
+      const row = { sourceThreadId: owner.sourceThreadId, taskId: owner.taskId };
+      if (resource.issue === undefined)
+        healthy.set(`${owner.sourceThreadId}\u0000${owner.taskId}`, row);
+      else
+        failing.set(`${owner.sourceThreadId}\u0000${owner.taskId}`, {
+          ...row,
+          issue: resource.issue,
+        });
     }
     for (const [key, next] of failing) {
       const previous = reportedIssues.get(key);
-      const issue =
-        previous !== undefined &&
-        previous.issue.cause === next.issue.cause &&
-        previous.issue.driverKind === next.issue.driverKind &&
-        previous.issue.profileId === next.issue.profileId
-          ? // The cause stands; only its wording may have changed.
-            { ...next.issue, firstSeenAt: previous.issue.firstSeenAt }
-          : next.issue;
-      reportedIssues.set(key, { ...next, issue });
-      if (sameIssue(previous?.issue, issue)) continue;
+      if (sameIssue(previous?.issue, next.issue)) continue;
       // A settled card would refuse the report every tick; track it no longer,
       // since a terminal card ignores issues anyway.
       const read = yield* threads
@@ -751,12 +763,34 @@ export const make = Effect.gen(function* () {
         .pipe(Effect.option);
       const task = Option.isSome(read) && read.value ? read.value.subagents.at(-1) : undefined;
       if (task !== undefined && task.result !== null) continue;
-      yield* tellTask(next.sourceThreadId, next.taskId, issue);
+      const told = yield* tellTask(next.sourceThreadId, next.taskId, next.issue);
+      if (told) reportedIssues.set(key, { ...next });
     }
     for (const [key, told] of reportedIssues) {
       if (failing.has(key)) continue;
+      if (!(yield* tellTask(told.sourceThreadId, told.taskId, undefined))) continue;
       reportedIssues.delete(key);
-      yield* tellTask(told.sourceThreadId, told.taskId, undefined);
+    }
+    // The told-map is process memory, so a card may still show an issue its
+    // record recovered from while the server was down. Reconcile each owner
+    // once: a card that is already quiet is done for good; a stale one goes
+    // unmarked until its clear lands, so a failed dispatch retries.
+    for (const [key, row] of healthy) {
+      if (reportedIssues.has(key) || reconciledOwners.has(key)) continue;
+      const read = yield* threads
+        .getThreadRecords(row.sourceThreadId, ["subagents"], {
+          subagentIds: [NodeId.make(row.taskId)],
+        })
+        .pipe(Effect.option);
+      const task = Option.isSome(read) && read.value ? read.value.subagents.at(-1) : undefined;
+      if (task === undefined) {
+        reconciledOwners.add(key);
+        continue;
+      }
+      const cardIssue = task.result === null ? task.remoteChild?.sandboxIssue : undefined;
+      if (cardIssue === undefined || (yield* tellTask(row.sourceThreadId, row.taskId, undefined))) {
+        reconciledOwners.add(key);
+      }
     }
     return failing.size;
   });

@@ -48,9 +48,8 @@ export const withoutIssue = (record: Store.CloudSandboxRecord): Store.CloudSandb
 };
 
 /**
- * Saves `issue` on the record as presence, not history: the same cause keeps
- * its first-seen time while its wording may update, and an unchanged issue
- * saves nothing. Best effort: a save that cannot land is a logged warning.
+ * Saves `issue` on the record as presence, not history: an identical failure
+ * span saves nothing. Best effort: a save that cannot land is a logged warning.
  */
 export const stampIssue = (
   store: ManagerRuntime["store"],
@@ -63,9 +62,8 @@ export const stampIssue = (
     current.cause === issue.cause &&
     current.driverKind === issue.driverKind &&
     current.profileId === issue.profileId;
-  const next = sameCause ? { ...issue, firstSeenAt: current.firstSeenAt } : issue;
-  if (current !== undefined && current.message === issue.message && sameCause) return Effect.void;
-  return store.save({ ...record, issue: next }).pipe(
+  if (sameCause) return Effect.void;
+  return store.save({ ...record, issue }).pipe(
     Effect.catchCause((cause) =>
       Effect.logWarning("Unable to stamp a follower sandbox issue on its record.", {
         resourceId: record.resourceId,
@@ -92,7 +90,11 @@ export const stampConnectIssue = Effect.fn("ManagerRuntime.stampConnectIssue")(f
   if (Option.isNone(found)) return;
   yield* stampIssue(store, found.value, {
     cause:
-      error.reason === "transport" || error.reason === "not-found" ? "connectivity" : "allocation",
+      error.reason === "transport" || error.reason === "not-found"
+        ? "connectivity"
+        : error.reason === "provider"
+          ? "provider-auth"
+          : "allocation",
     driverKind: found.value.driverKind,
     profileId: found.value.profileId,
     message: error.message,
