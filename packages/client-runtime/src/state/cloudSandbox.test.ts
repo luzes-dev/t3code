@@ -62,6 +62,8 @@ const resource = (overrides: {
   profileId: SandboxProfileId.make(overrides.profileId ?? "boat-main"),
   sandboxId: overrides.sandboxId === undefined ? "sbx-1" : overrides.sandboxId,
   parentResourceId: null,
+  owner: { _tag: "user" },
+  retention: "manual",
   phase: overrides.phase,
   environmentId: null,
   label: overrides.id,

@@ -16,6 +16,7 @@ import type {
   ManagedCloudSandboxResourceId,
   ManagedCloudSandboxSourceOperation,
   ManagedCloudSandboxSourceResult,
+  ManagedSandboxRetention,
 } from "@t3tools/contracts";
 import * as Profiles from "./CloudSandboxProfiles.ts";
 import * as Store from "./CloudSandboxStore.ts";
@@ -92,6 +93,11 @@ export class CloudSandboxManager extends Context.Service<
       token: string,
       operation: ManagedCloudSandboxSourceOperation,
     ) => Effect.Effect<ManagedCloudSandboxSourceResult, Store.CloudSandboxManagerError>;
+    readonly bindOwner: (
+      resourceId: ManagedCloudSandboxResourceId,
+      owner: import("@t3tools/contracts").ManagedSandboxFollowerOwner,
+      retention?: ManagedSandboxRetention | undefined,
+    ) => Effect.Effect<ManagedCloudSandboxResource, Store.CloudSandboxManagerError>;
     readonly sourceContext: (
       resourceId: ManagedCloudSandboxResourceId,
       token: string,
@@ -108,7 +114,7 @@ export const make = Effect.gen(function* () {
   const allocation = makeAllocation(rt, connections);
   const { provision, fork, release } = allocation;
   const control = makeControl(rt, connections, allocation);
-  const { execute, artifact, executeSource } = control;
+  const { execute, artifact, executeSource, bindOwnerLocked } = control;
   const { reconcile } = makeReconciler(rt, connections, allocation);
   yield* reconcile.pipe(
     Effect.catchCause(() => Effect.logWarning("Managed cloud reconciliation will retry.")),
@@ -137,6 +143,12 @@ export const make = Effect.gen(function* () {
     artifact,
     sourceContext,
     executeSource,
+    bindOwner: Effect.fn("CloudSandboxManager.bindOwner")((resourceId, owner, retention) =>
+      locks.withLock(
+        resourceId,
+        bindOwnerLocked(resourceId, owner, rt.controllerEnvironmentId, retention),
+      ),
+    ),
     get: Effect.fn("CloudSandboxManager.get")((id) =>
       requireRecord(id).pipe(Effect.map(publicResource)),
     ),

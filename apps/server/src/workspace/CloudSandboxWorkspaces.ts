@@ -23,6 +23,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as SqlClient from "effect/sql/SqlClient";
+import type { ManagedSandboxFollowerOwner } from "@t3tools/contracts";
 import type { McpThreadInvocationScope } from "../mcp/McpInvocationContext.ts";
 import { ProjectToolkit } from "../mcp/toolkits/project/tools.ts";
 import * as Threads from "../orchestration-v2/ThreadManagementService.ts";
@@ -357,6 +358,18 @@ export const make = Effect.gen(function* () {
         .release(resourceId)
         .pipe(Effect.mapError(() => failure("Unable to delete the sandbox workspace.")));
   });
+  /** Records the owner of a delegated workspace's resource; the controller
+   * derives the host id, so in-sandbox and root paths validate identically. */
+  const bindResourceOwner = Effect.fn("CloudSandboxWorkspaces.bindResourceOwner")(function* (
+    resourceId: ManagedCloudSandboxResourceId,
+    owner: ManagedSandboxFollowerOwner,
+  ) {
+    if (yield* controller.available)
+      return yield* controller.request({ _tag: "bindOwner", resourceId, owner });
+    yield* manager
+      .bindOwner(resourceId, owner)
+      .pipe(Effect.mapError(() => failure("Unable to bind the sandbox owner.")));
+  });
   const inspectResource = Effect.fn("CloudSandboxWorkspaces.inspectResource")(function* (
     resourceId: ManagedCloudSandboxResourceId,
   ) {
@@ -493,6 +506,11 @@ export const make = Effect.gen(function* () {
         Pick<SandboxWorktreeHandoffResult, "taskId" | "threadId" | "projectId">,
         WorktreeMcpFailure
       >;
+      /** Binds the resource to its owner once the delegated child task exists. */
+      readonly owner: (
+        delegated: { readonly taskId: string },
+        connection: ManagedCloudSandboxConnection,
+      ) => ManagedSandboxFollowerOwner;
     },
   ) {
     const { workspaceId, requestJson } = input;
@@ -548,6 +566,19 @@ export const make = Effect.gen(function* () {
           connection: acquired.connection,
           childProjectId: attached.childProjectId,
         });
+        // Task ownership binds after the child exists; a failed bind keeps the
+        // resource visible as user-owned until a retry or the orphan sweep.
+        yield* bindResourceOwner(
+          acquired.connection.resourceId,
+          input.owner({ taskId: delegated.taskId }, acquired.connection),
+        ).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning(
+              "Unable to bind sandbox ownership; the workspace stays user-owned until a retry.",
+              { workspaceId, cause },
+            ).pipe(Effect.asVoid),
+          ),
+        );
         const result: SandboxWorktreeHandoffResult = {
           kind: "sandbox",
           workspaceId,
@@ -707,6 +738,12 @@ export const make = Effect.gen(function* () {
                 ),
               ),
             ),
+        owner: (delegated, connection) => ({
+          _tag: "task",
+          hostEnvironmentId: connection.controllerEnvironmentId,
+          sourceThreadId: scope.thread.threadId,
+          taskId: delegated.taskId,
+        }),
       });
     }),
     remove: Effect.fn("CloudSandboxWorkspaces.remove")(function* (scope, workspaceId) {
@@ -855,6 +892,12 @@ export const make = Effect.gen(function* () {
                   ),
                 ),
               ),
+          owner: (delegated, connection) => ({
+            _tag: "task",
+            hostEnvironmentId: connection.controllerEnvironmentId,
+            sourceThreadId: scope.thread.threadId,
+            taskId: delegated.taskId,
+          }),
         });
       },
     ),

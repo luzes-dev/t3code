@@ -6,6 +6,8 @@ import * as Schema from "effect/Schema";
 import { cloudSandboxSupportsMachine } from "@t3tools/cloud-sandbox";
 import {
   ManagedCloudSandboxProvisionInput,
+  legacyOwner,
+  legacyRetention,
   type CloudSandboxProfile,
   type ManagedCloudSandboxForkInput,
   type ManagedCloudSandboxResourceId,
@@ -173,6 +175,10 @@ export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnectio
             profileId: input.profile,
             sandboxId: null,
             parentResourceId: null,
+            // Fresh resources start user-owned; delegated followers are bound
+            // to their task/thread owner after the child task exists.
+            owner: legacyOwner(),
+            retention: legacyRetention(),
             lifecycle: "allocating",
             power: "running",
             intent: "connected",
@@ -200,6 +206,7 @@ export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnectio
 
   const forkUnlocked = Effect.fn("CloudSandboxManager.fork")(function* (
     input: ManagedCloudSandboxForkInput,
+    options?: { readonly inheritOwner?: boolean },
   ) {
     return yield* Effect.gen(function* () {
       const source = yield* requireRecord(input.sourceResourceId);
@@ -235,6 +242,10 @@ export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnectio
             profileId: source.profileId,
             sandboxId: null,
             parentResourceId: source.resourceId,
+            // A root-initiated fork inherits its source's ownership; a
+            // child-initiated fork starts unbound and is bound to its task.
+            owner: options?.inheritOwner === false ? legacyOwner() : source.owner,
+            retention: options?.inheritOwner === false ? legacyRetention() : source.retention,
             lifecycle: "allocating",
             power: "running",
             intent: "connected",

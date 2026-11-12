@@ -117,6 +117,8 @@ const sandbox: ManagedCloudSandboxResource = {
   profileId: SandboxProfileId.make("boat-main"),
   sandboxId: "sbx-1",
   parentResourceId: null,
+  owner: { _tag: "user" },
+  retention: "manual",
   phase: "connected",
   environmentId: null,
   label: "Feature sandbox",

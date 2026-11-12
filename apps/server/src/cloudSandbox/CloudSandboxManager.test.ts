@@ -5,7 +5,12 @@ import * as Queue from "effect/Queue";
 import * as TestClock from "effect/testing/TestClock";
 import { CloudSandboxRenewalsEnabled } from "./CloudSandboxManager.ts";
 import { expect, it } from "@effect/vitest";
-import { EnvironmentId, ManagedCloudSandboxResourceId, SandboxProfileId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ManagedCloudSandboxResourceId,
+  SandboxProfileId,
+  ThreadId,
+} from "@t3tools/contracts";
 import type { CloudSandboxDetails } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import {
@@ -1215,6 +1220,8 @@ it.effect.each(["found", "missing"] as const)(
         driverKind: "boat",
         sandboxId: null,
         parentResourceId: null,
+        owner: { _tag: "user" },
+        retention: "manual",
         lifecycle: "allocating",
         power: "running",
         intent: "connected",
@@ -1264,4 +1271,43 @@ it.effect.each(["found", "missing"] as const)(
       }
       expect(creates).toHaveLength(0);
     }).pipe(Effect.scoped),
+);
+
+it.effect("binds a provisioned resource to a follower owner and refuses hostile rebinding", () =>
+  Effect.gen(function* () {
+    const f = fixture();
+    const manager = yield* f.manager;
+    const id = ManagedCloudSandboxResourceId.make("bound-follower");
+    yield* manager.provision({
+      operationId: id,
+      profile: SandboxProfileId.make("fixture"),
+      sandbox: { name: "follower", size: "small", autoStopMinutes: 15 },
+    });
+    const bound = yield* manager.bindOwner(id, {
+      _tag: "task",
+      hostEnvironmentId: EnvironmentId.make("controller"),
+      sourceThreadId: ThreadId.make("thread-1"),
+      taskId: "task-1",
+    });
+    expect(bound.owner).toMatchObject({ _tag: "task", taskId: "task-1" });
+    // The same owner binds again harmlessly; a different owner cannot take over.
+    yield* manager.bindOwner(id, {
+      _tag: "task",
+      hostEnvironmentId: EnvironmentId.make("controller"),
+      sourceThreadId: ThreadId.make("thread-1"),
+      taskId: "task-1",
+    });
+    const takeover = yield* manager
+      .bindOwner(id, {
+        _tag: "task",
+        hostEnvironmentId: EnvironmentId.make("controller"),
+        sourceThreadId: ThreadId.make("thread-2"),
+        taskId: "task-2",
+      })
+      .pipe(Effect.result);
+    expect(takeover._tag).toBe("Failure");
+    expect(yield* manager.get(id)).toMatchObject({
+      owner: { _tag: "task", taskId: "task-1" },
+    });
+  }).pipe(Effect.scoped),
 );

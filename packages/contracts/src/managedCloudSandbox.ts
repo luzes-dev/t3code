@@ -1,6 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { EnvironmentId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { EnvironmentId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import {
   CloudSandboxCapabilities,
   CloudSandboxDetails,
@@ -12,6 +12,32 @@ import {
   SandboxRecording,
 } from "./environment.ts";
 
+/** Who created and controls the lifecycle of a managed sandbox resource. */
+export const ManagedSandboxOwner = Schema.Union([
+  Schema.TaggedStruct("user", {}),
+  Schema.TaggedStruct("thread", {
+    hostEnvironmentId: EnvironmentId,
+    threadId: ThreadId,
+  }),
+  Schema.TaggedStruct("task", {
+    hostEnvironmentId: EnvironmentId,
+    sourceThreadId: ThreadId,
+    taskId: Schema.String,
+  }),
+]);
+export type ManagedSandboxOwner = typeof ManagedSandboxOwner.Type;
+
+/** Retention policy applied when the owner finishes with the resource. */
+export const ManagedSandboxRetention = Schema.Literals([
+  "manual",
+  "stop-and-retain",
+  "delete-on-completion",
+]);
+export type ManagedSandboxRetention = typeof ManagedSandboxRetention.Type;
+/** Legacy records without owner/retention metadata decode as user-owned and manual. */
+export const legacyOwner = (): ManagedSandboxOwner => ({ _tag: "user" });
+export const legacyRetention = (): ManagedSandboxRetention => "manual";
+export type ManagedSandboxFollowerOwner = Exclude<ManagedSandboxOwner, { _tag: "user" }>;
 export const MANAGED_CLOUD_SANDBOX_PATH = "/api/cloud-sandboxes/managed";
 export const managedCloudSandboxProxyPath = (resourceId: string) =>
   `${MANAGED_CLOUD_SANDBOX_PATH}/${resourceId}/proxy`;
@@ -29,6 +55,10 @@ export const ManagedCloudSandboxResource = Schema.Struct({
   profileId: SandboxProfileId,
   sandboxId: Schema.NullOr(Schema.String),
   parentResourceId: Schema.NullOr(ManagedCloudSandboxResourceId),
+  owner: ManagedSandboxOwner.pipe(Schema.withDecodingDefault(Effect.succeed(legacyOwner()))),
+  retention: ManagedSandboxRetention.pipe(
+    Schema.withDecodingDefault(Effect.succeed(legacyRetention())),
+  ),
   phase: Schema.Literals([
     "allocating",
     "connecting",
@@ -72,6 +102,10 @@ export const ManagedCloudSandboxForkInput = Schema.Struct({
   enableLinkedEnvironments: Schema.optionalKey(Schema.Boolean),
 });
 export type ManagedCloudSandboxForkInput = typeof ManagedCloudSandboxForkInput.Type;
+/** Valid lifecycle/owner/retention combinations for a bound resource. */
+export const retentionForOwner = (owner: ManagedSandboxOwner): ManagedSandboxRetention =>
+  owner._tag === "user" ? "manual" : "stop-and-retain";
+
 export const ManagedCloudSandboxControlOperation = Schema.Union([
   Schema.TaggedStruct("usage", {}),
   Schema.TaggedStruct("recordingStart", { recordingId: ManagedCloudSandboxResourceId }),
@@ -120,6 +154,14 @@ export const ManagedCloudSandboxOperation = Schema.Union([
   Schema.TaggedStruct("fork", ManagedCloudSandboxForkInput.fields),
   Schema.TaggedStruct("delete", { resourceId: ManagedCloudSandboxResourceId }),
   Schema.TaggedStruct("disconnect", { resourceId: ManagedCloudSandboxResourceId }),
+  // Binds a provisioned/forked resource to its owning thread or task after the
+  // delegated child exists. Host ids are re-derived server-side; clients cannot
+  // assert them.
+  Schema.TaggedStruct("bindOwner", {
+    resourceId: ManagedCloudSandboxResourceId,
+    owner: Schema.Union([ManagedSandboxOwner.members[1], ManagedSandboxOwner.members[2]]),
+    retention: Schema.optionalKey(ManagedSandboxRetention),
+  }),
 ]);
 export type ManagedCloudSandboxOperation = typeof ManagedCloudSandboxOperation.Type;
 export const ManagedCloudSandboxContext = Schema.Struct({
@@ -155,6 +197,13 @@ export const ManagedCloudSandboxSourceOperation = Schema.Union([
   }),
   Schema.TaggedStruct("connect", { resourceId: ManagedCloudSandboxResourceId }),
   Schema.TaggedStruct("delete", { resourceId: ManagedCloudSandboxResourceId }),
+  // A follower of this sandbox binds its own fork's ownership after its child
+  // task exists; the controller re-derives the host from the authenticating resource.
+  Schema.TaggedStruct("bindOwner", {
+    resourceId: ManagedCloudSandboxResourceId,
+    owner: Schema.Union([ManagedSandboxOwner.members[1], ManagedSandboxOwner.members[2]]),
+    retention: Schema.optionalKey(ManagedSandboxRetention),
+  }),
 ]);
 export type ManagedCloudSandboxSourceOperation = typeof ManagedCloudSandboxSourceOperation.Type;
 

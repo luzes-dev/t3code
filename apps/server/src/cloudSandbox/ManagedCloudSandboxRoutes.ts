@@ -149,6 +149,11 @@ const management = Effect.gen(function* () {
     case "disconnect":
       yield* manager.disconnect(input.resourceId);
       return yield* HttpServerResponse.json({ _tag: "disconnected" });
+    case "bindOwner": {
+      // The controller derives the host; clients never assert it.
+      const resource = yield* manager.bindOwner(input.resourceId, input.owner, input.retention);
+      return yield* HttpServerResponse.json({ _tag: "resource", resource });
+    }
   }
 });
 

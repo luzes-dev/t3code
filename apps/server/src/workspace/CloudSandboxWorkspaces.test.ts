@@ -352,6 +352,8 @@ it.effect.each([
     sandboxId: "sandbox",
     parentResourceId: null,
     phase: scenario.phase,
+    owner: { _tag: "user" },
+    retention: "manual",
     environmentId: EnvironmentId.make("child"),
     label: "Child",
     recordingIds: [],
@@ -584,12 +586,13 @@ it.effect(
         expect(receivedExecution?.runtimeMode).toBe(input.runtimeMode);
         expect(receivedExecution?.interactionMode).toBe(input.interactionMode);
         expect(yield* workspaces.delegateSandboxTask(scope, input)).toEqual(result);
-        expect(controllerCalls).toBe(1);
+        // The fork and the follow-up owner bind each make one controller call.
+        expect(controllerCalls).toBe(2);
         const reused = yield* workspaces
           .delegateSandboxTask(scope, { ...input, task: "Inspect something else" })
           .pipe(Effect.flip);
         expect(reused.message).toContain("already belongs to another request");
-        expect(controllerCalls).toBe(1);
+        expect(controllerCalls).toBe(2);
       }).pipe(
         Effect.provide(
           Workspaces.layer.pipe(Layer.provideMerge(dependencies), Layer.provide(Controller.layer)),
@@ -818,6 +821,8 @@ it.effect(
       deletedAt: null,
     };
     const healthyResource = {
+      owner: { _tag: "user" },
+      retention: "manual",
       resourceId: ManagedCloudSandboxResourceId.make("owned-healthy"),
       controllerEnvironmentId: EnvironmentId.make("controller"),
       driverKind: "boat" as const,

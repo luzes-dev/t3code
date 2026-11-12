@@ -43,6 +43,8 @@ const resource: Store.CloudSandboxRecord = {
   deletionOperationId: null,
   finalSpendUsd: null,
   enableLinkedEnvironments: true,
+  owner: { _tag: "user" },
+  retention: "manual",
 };
 const layer = Profiles.layer.pipe(
   Layer.provide(ServerSecretStore.layer),

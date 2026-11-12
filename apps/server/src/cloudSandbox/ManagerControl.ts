@@ -1,12 +1,18 @@
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import { cloudSandboxCapabilities } from "@t3tools/cloud-sandbox";
 import {
   MANAGED_CLOUD_SOURCE_PORT,
+  ManagedSandboxOwner,
+  retentionForOwner,
+  type EnvironmentId,
   type ManagedCloudSandboxControlOperation,
   type ManagedCloudSandboxControlResult,
   type ManagedCloudSandboxResourceId,
   type ManagedCloudSandboxSourceOperation,
   type ManagedCloudSandboxSourceResult,
+  type ManagedSandboxFollowerOwner,
+  type ManagedSandboxRetention,
 } from "@t3tools/contracts";
 import * as Store from "./CloudSandboxStore.ts";
 import { isDeletedOrDeleting, toError, type ManagerRuntime } from "./ManagerRuntime.ts";
@@ -30,6 +36,40 @@ export const makeControl = (
   } = rt;
   const { sourceContext, connectUnlocked, disconnectUnlocked } = connections;
   const { fork, release, reserveResume } = allocation;
+  const ownerEquivalence = Schema.toEquivalence(ManagedSandboxOwner);
+  /** Stamps ownership onto an unbound or identically-owned record. The host id
+   * is always derived by the controller; callers never assert it. */
+  const bindOwnerLocked = Effect.fn("CloudSandboxManager.bindOwnerLocked")(function* (
+    id: ManagedCloudSandboxResourceId,
+    owner: ManagedSandboxFollowerOwner,
+    hostEnvironmentId: EnvironmentId,
+    retention?: ManagedSandboxRetention | undefined,
+  ) {
+    const record = yield* requireRecord(id);
+    if (isDeletedOrDeleting(record))
+      return yield* new Store.CloudSandboxManagerError({ reason: "conflict" });
+    // The host identity comes from the record's controller, not the caller.
+    const canonical: ManagedSandboxOwner =
+      owner._tag === "thread"
+        ? { _tag: "thread", hostEnvironmentId, threadId: owner.threadId }
+        : {
+            _tag: "task",
+            hostEnvironmentId,
+            sourceThreadId: owner.sourceThreadId,
+            taskId: owner.taskId,
+          };
+    // Rebinding to a different owner is refused: one task cannot take over
+    // another's sandbox, and a retry with the same owner stays idempotent.
+    if (record.owner._tag !== "user" && !ownerEquivalence(record.owner, canonical))
+      return yield* new Store.CloudSandboxManagerError({ reason: "ownership" });
+    const next: Store.CloudSandboxRecord = {
+      ...record,
+      owner: canonical,
+      retention: retention ?? retentionForOwner(canonical),
+    };
+    yield* store.save(next);
+    return publicResource(next);
+  });
   const executeUnlocked = Effect.fn("CloudSandboxManager.execute")(function* (
     id: ManagedCloudSandboxResourceId,
     operation: ManagedCloudSandboxControlOperation,
@@ -248,8 +288,32 @@ export const makeControl = (
         yield* requireOwnedChild(operation.resourceId);
         yield* release(operation.resourceId);
         return { _tag: "deleted" };
+      case "bindOwner": {
+        // A child may bind only its own fork, and only to an owner hosted on
+        // this controller derived from the authenticating resource's identity:
+        // the host id arrives from the record, never the child.
+        const auth = yield* requireRecord(id);
+        if (auth.environmentId === null)
+          return yield* new Store.CloudSandboxManagerError({ reason: "ownership" });
+        yield* requireOwnedChild(operation.resourceId);
+        const bound = yield* locks.withLock(
+          operation.resourceId,
+          bindOwnerLocked(
+            operation.resourceId,
+            operation.owner,
+            auth.environmentId,
+            operation.retention,
+          ),
+        );
+        return { _tag: "resource", resource: bound };
+      }
     }
   });
 
-  return { execute, artifact, executeSource };
+  return {
+    execute,
+    artifact,
+    executeSource,
+    bindOwnerLocked,
+  };
 };
