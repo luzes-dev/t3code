@@ -13,6 +13,7 @@ import {
   WorktreeMcpFailure,
   NodeId,
   OrchestratorMcpFailure,
+  type OrchestrationV2StoredEvent,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -22,6 +23,7 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import { idleThreadProjection, liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as Stream from "effect/Stream";
 import * as Sqlite from "../persistence/Sqlite.ts";
 import * as Threads from "../orchestration-v2/ThreadManagementService.ts";
 import * as Projects from "../project/ProjectService.ts";
@@ -343,21 +345,54 @@ it.effect.each([
     attempts: 0,
     reclaimed: 1,
   },
+  {
+    record: "running",
+    threadLive: true,
+    retention: "delete-on-completion",
+    taskSettled: true,
+    phase: "connected",
+    state: "stopped",
+    fails: false,
+    attempts: 1,
+    reclaimed: 1,
+  },
+  {
+    record: "running",
+    threadLive: true,
+    retention: "delete-on-completion",
+    taskSettled: false,
+    phase: "connected",
+    state: "stopped",
+    fails: false,
+    attempts: 0,
+    reclaimed: 0,
+  },
+  {
+    record: "running",
+    threadLive: true,
+    retention: "delete-on-completion",
+    taskSettled: true,
+    phase: "connected",
+    state: "ready",
+    fails: false,
+    attempts: 0,
+    reclaimed: 0,
+  },
 ] as const)("reclaims only stopped VMs after confirmed deletion (%s)", (scenario) => {
   const resource = {
     resourceId: ManagedCloudSandboxResourceId.make("owned"),
     controllerEnvironmentId: EnvironmentId.make("controller"),
-    driverKind: "boat",
+    driverKind: "boat" as const,
     profileId: SandboxProfileId.make("boat"),
     sandboxId: "sandbox",
     parentResourceId: null,
-    phase: scenario.phase,
-    owner: { _tag: "user" },
-    retention: "manual",
+    phase: scenario.phase as "connected" | "failed" | "stopped" | "deleted",
+    owner: { _tag: "user" } as const,
+    retention: (scenario.retention ?? "manual") as "manual" | "delete-on-completion",
     environmentId: EnvironmentId.make("child"),
     label: "Child",
     recordingIds: [],
-  } as const;
+  };
   let attempts = 0;
   let unlinks = 0;
   const dependencies = Layer.mergeAll(
@@ -367,6 +402,21 @@ it.effect.each([
     Layer.mock(Threads.ThreadManagementService)({
       getThreadShell: () =>
         Effect.succeed(scenario.threadLive ? liveThreadShell(ThreadId.make("owner")) : null),
+      streamStoredEventsFrom: (input) =>
+        input?.eventType !== "subagent.updated"
+          ? Stream.empty
+          : Stream.fromIterable([
+              {
+                sequence: 1,
+                event: {
+                  type: "subagent.updated",
+                  payload: {
+                    id: "task-1",
+                    status: scenario.taskSettled === true ? "completed" : "running",
+                  },
+                },
+              } as unknown as OrchestrationV2StoredEvent,
+            ]),
     }),
     Layer.mock(Projects.ProjectService)({}),
     Layer.mock(Links.PeerLinks)({
@@ -423,7 +473,21 @@ it.effect.each([
       requestJson: "{}",
       phase: scenario.record,
       childEnvironmentId: "child",
-      result: null,
+      result:
+        "retention" in scenario && scenario.retention === "delete-on-completion"
+          ? {
+              kind: "sandbox",
+              workspaceId: "owned",
+              resourceId: "owned",
+              environmentId: "child",
+              projectId: "project-1",
+              threadId: "child-thread-1",
+              taskId: "task-1",
+              workspacePath: "/source/repo",
+              branch: "sandbox/owned",
+              note: "test",
+            }
+          : null,
     });
     yield* sql`INSERT INTO cloud_sandbox_workspaces (workspace_id,source_thread_id,payload_json)
       VALUES ('owned','owner',${payload})`;
@@ -821,8 +885,8 @@ it.effect(
       deletedAt: null,
     };
     const healthyResource = {
-      owner: { _tag: "user" },
-      retention: "manual",
+      owner: { _tag: "user" } as const,
+      retention: "manual" as const,
       resourceId: ManagedCloudSandboxResourceId.make("owned-healthy"),
       controllerEnvironmentId: EnvironmentId.make("controller"),
       driverKind: "boat" as const,

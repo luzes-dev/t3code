@@ -22,8 +22,9 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
-import type { ManagedSandboxFollowerOwner } from "@t3tools/contracts";
+import type { ManagedSandboxFollowerOwner, ManagedSandboxRetention } from "@t3tools/contracts";
 import type { McpThreadInvocationScope } from "../mcp/McpInvocationContext.ts";
 import { ProjectToolkit } from "../mcp/toolkits/project/tools.ts";
 import * as Threads from "../orchestration-v2/ThreadManagementService.ts";
@@ -121,6 +122,7 @@ export class CloudSandboxWorkspaces extends Context.Service<
         readonly autoStopMinutes?: number | undefined;
         readonly profile?: SandboxProfileId | undefined;
         readonly runSetupScript: boolean;
+        readonly deleteOnCompletion?: boolean | undefined;
       },
     ) => Effect.Effect<SandboxWorktreeHandoffResult, WorktreeMcpFailure>;
     /**
@@ -363,11 +365,17 @@ export const make = Effect.gen(function* () {
   const bindResourceOwner = Effect.fn("CloudSandboxWorkspaces.bindResourceOwner")(function* (
     resourceId: ManagedCloudSandboxResourceId,
     owner: ManagedSandboxFollowerOwner,
+    retention?: ManagedSandboxRetention | undefined,
   ) {
     if (yield* controller.available)
-      return yield* controller.request({ _tag: "bindOwner", resourceId, owner });
+      return yield* controller.request({
+        _tag: "bindOwner",
+        resourceId,
+        owner,
+        ...(retention === undefined ? {} : { retention }),
+      });
     yield* manager
-      .bindOwner(resourceId, owner)
+      .bindOwner(resourceId, owner, retention)
       .pipe(Effect.mapError(() => failure("Unable to bind the sandbox owner.")));
   });
   const inspectResource = Effect.fn("CloudSandboxWorkspaces.inspectResource")(function* (
@@ -388,9 +396,38 @@ export const make = Effect.gen(function* () {
       return yield* failure("Unable to inspect the sandbox power state.");
     return result.result;
   });
+  const doneStatuses = new Set(["completed", "failed", "cancelled", "interrupted"]);
+  /**
+   * Latest known delegated-task status from the parent thread's stored events.
+   * Unreadable events mean unknown, and an unknown task is never "settled".
+   */
+  const delegatedSettled = Effect.fn("CloudSandboxWorkspaces.delegatedSettled")(function* (
+    sourceThreadId: ThreadId,
+    taskId: string,
+  ) {
+    const last = yield* threads
+      .streamStoredEventsFrom({
+        threadId: sourceThreadId,
+        afterSequence: 0,
+        eventType: "subagent.updated",
+      })
+      .pipe(
+        Stream.filter(
+          (stored) =>
+            stored.event.type === "subagent.updated" && stored.event.payload.id === taskId,
+        ),
+        Stream.map((stored) =>
+          stored.event.type === "subagent.updated" ? stored.event.payload.status : null,
+        ),
+        Stream.runLast,
+        Effect.catch(() => Effect.succeedNone),
+      );
+    return Option.isSome(last) && last.value !== null && doneStatuses.has(last.value);
+  });
   /**
    * Deletes sandbox workspaces whose VM has already stopped and that are
    * orphaned: their source thread is gone, or they never finished creating.
+   * A follower bound to delete-on-completion also goes once its task settled.
    * Active children and live VMs are never touched.
    */
   const sweepOnce = Effect.fn("CloudSandboxWorkspaces.sweep")(function* () {
@@ -415,7 +452,12 @@ export const make = Effect.gen(function* () {
         const resource = yield* inspectResource(resourceId).pipe(Effect.option);
         if (Option.isNone(resource)) return false;
         if (resource.value.phase !== "deleted") {
-          if (!orphaned && record.value.phase !== "creating") return false;
+          const settlesIt =
+            resource.value.retention === "delete-on-completion" &&
+            record.value.phase === "running" &&
+            record.value.result !== null &&
+            (yield* delegatedSettled(record.value.sourceThreadId, record.value.result.taskId));
+          if (!settlesIt && !orphaned && record.value.phase !== "creating") return false;
           const status = yield* inspectPowerState(resourceId).pipe(Effect.option);
           if (
             Option.isNone(status) ||
@@ -506,11 +548,15 @@ export const make = Effect.gen(function* () {
         Pick<SandboxWorktreeHandoffResult, "taskId" | "threadId" | "projectId">,
         WorktreeMcpFailure
       >;
-      /** Binds the resource to its owner once the delegated child task exists. */
+      /** Binds the resource to its owner once the delegated child task exists,
+       * with the retention the delegating flow asked for. */
       readonly owner: (
         delegated: { readonly taskId: string },
         connection: ManagedCloudSandboxConnection,
-      ) => ManagedSandboxFollowerOwner;
+      ) => {
+        readonly owner: ManagedSandboxFollowerOwner;
+        readonly retention?: ManagedSandboxRetention | undefined;
+      };
     },
   ) {
     const { workspaceId, requestJson } = input;
@@ -568,10 +614,8 @@ export const make = Effect.gen(function* () {
         });
         // Task ownership binds after the child exists; a failed bind keeps the
         // resource visible as user-owned until a retry or the orphan sweep.
-        yield* bindResourceOwner(
-          acquired.connection.resourceId,
-          input.owner({ taskId: delegated.taskId }, acquired.connection),
-        ).pipe(
+        const bound = input.owner({ taskId: delegated.taskId }, acquired.connection);
+        yield* bindResourceOwner(acquired.connection.resourceId, bound.owner, bound.retention).pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning(
               "Unable to bind sandbox ownership; the workspace stays user-owned until a retry.",
@@ -739,10 +783,12 @@ export const make = Effect.gen(function* () {
               ),
             ),
         owner: (delegated, connection) => ({
-          _tag: "task",
-          hostEnvironmentId: connection.controllerEnvironmentId,
-          sourceThreadId: scope.thread.threadId,
-          taskId: delegated.taskId,
+          owner: {
+            _tag: "task",
+            hostEnvironmentId: connection.controllerEnvironmentId,
+            sourceThreadId: scope.thread.threadId,
+            taskId: delegated.taskId,
+          },
         }),
       });
     }),
@@ -893,10 +939,17 @@ export const make = Effect.gen(function* () {
                 ),
               ),
           owner: (delegated, connection) => ({
-            _tag: "task",
-            hostEnvironmentId: connection.controllerEnvironmentId,
-            sourceThreadId: scope.thread.threadId,
-            taskId: delegated.taskId,
+            owner: {
+              _tag: "task",
+              hostEnvironmentId: connection.controllerEnvironmentId,
+              sourceThreadId: scope.thread.threadId,
+              taskId: delegated.taskId,
+            },
+            // Opted-in disposability: the sweep deletes this stopped sandbox
+            // once the delegated task settles; the default retains it.
+            ...(input.deleteOnCompletion === true
+              ? { retention: "delete-on-completion" as const }
+              : {}),
           }),
         });
       },

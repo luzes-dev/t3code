@@ -2523,6 +2523,7 @@ const make = Effect.gen(function* () {
             branch: `sandbox/${workspaceId}`,
             workspaceId,
             runSetupScript: true,
+            ...(input.deleteOnCompletion === true ? { deleteOnCompletion: true } : {}),
           })
           .pipe(
             Effect.mapError((cause) =>

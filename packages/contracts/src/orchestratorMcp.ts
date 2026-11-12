@@ -177,6 +177,12 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
         "'shared' (default): parent checkout. 'worktree': new prepared checkout from the parent commit, for a separate checkout or PR per child; uncommitted edits stay out. 'sandbox': a fresh disposable cloud sandbox per child, provisioned from the server's configured cloud sandbox profile; heavier, use for isolated builds/tests or dirty-tree experiments; async only, never with mode 'wait'.",
     }),
   ),
+  deleteOnCompletion: Schema.optional(
+    Schema.Boolean.annotate({
+      description:
+        "With isolation 'sandbox': delete the sandbox once the delegated task settles (completed, failed, cancelled, or interrupted) and its VM has stopped. Default keeps the stopped sandbox for inspection and recovery.",
+    }),
+  ),
   mode: Schema.optional(
     Schema.Literals(["async", "wait"]).annotate({
       description:
