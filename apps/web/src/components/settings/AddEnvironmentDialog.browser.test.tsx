@@ -118,7 +118,7 @@ describe("AddEnvironmentDialog", () => {
     await using _screen = await render(<Owner />);
 
     await openDialogOnSsh();
-    await userEvent.type(page.getByPlaceholder("Search hosts or type devbox"), "devbox");
+    await userEvent.fill(page.getByPlaceholder("Search hosts or type devbox"), "devbox");
     await userEvent.click(page.getByRole("button", { name: "Next" }));
     await userEvent.click(page.getByRole("dialog").getByRole("button", { name: "Connect" }));
     expect(mocks.connectSshEnvironment).toHaveBeenCalledOnce();
@@ -131,15 +131,15 @@ describe("AddEnvironmentDialog", () => {
     await using _screen = await render(<Owner />);
 
     await openDialogOnSsh();
-    await userEvent.type(page.getByPlaceholder("Search hosts or type devbox"), "devbox");
-    await userEvent.type(page.getByPlaceholder("root"), "maria");
-    await userEvent.type(page.getByPlaceholder("22"), "2222");
+    await userEvent.fill(page.getByPlaceholder("Search hosts or type devbox"), "devbox");
+    await userEvent.fill(page.getByPlaceholder("root"), "maria");
+    await userEvent.fill(page.getByPlaceholder("22"), "2222");
 
     await userEvent.click(page.getByRole("button", { name: "Back" }));
     await userEvent.click(remoteCard());
     await userEvent.click(page.getByRole("button", { name: "Next" }));
-    await userEvent.type(page.getByPlaceholder("backend.example.com"), "devbox.example.com");
-    await userEvent.type(page.getByPlaceholder("PAIRCODE"), "PAIRCODE");
+    await userEvent.fill(page.getByPlaceholder("backend.example.com"), "devbox.example.com");
+    await userEvent.fill(page.getByPlaceholder("PAIRCODE"), "PAIRCODE");
     await userEvent.keyboard("{Escape}");
 
     await expectDefaultModeAfterReopen();
@@ -157,7 +157,7 @@ describe("AddEnvironmentDialog", () => {
       finishConnection = resolve;
     });
     mocks.connectSshEnvironment.mockImplementationOnce(() => pending);
-    await userEvent.type(page.getByPlaceholder("Search hosts or type devbox"), "devbox");
+    await userEvent.fill(page.getByPlaceholder("Search hosts or type devbox"), "devbox");
     await userEvent.click(page.getByRole("button", { name: "Next" }));
     await userEvent.click(page.getByRole("dialog").getByRole("button", { name: "Connect" }));
     await userEvent.keyboard("{Escape}");

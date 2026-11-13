@@ -70,6 +70,10 @@ import {
 } from "./AddEnvironmentDialog.logic";
 
 const EMPTY_DISCOVERED_SSH_HOSTS: ReadonlyArray<DesktopDiscoveredSshHost> = [];
+// known_hosts can list one host on several ports. Its own bracketed form keeps an IPv6
+// host's port separate from the address; no portless known_hosts entry has that form.
+const sshHostSuggestionValue = (target: DesktopDiscoveredSshHost) =>
+  target.port === null ? target.alias : `[${target.alias}]:${target.port}`;
 
 export function AddEnvironmentDialog({
   open,
@@ -407,6 +411,7 @@ export function AddEnvironmentDialog({
       setIsConnecting(false);
       return;
     }
+    if (target.port !== null) resolved = { ...resolved, port: target.port };
     setDraft((prev) => ({
       ...prev,
       ssh: {
@@ -638,7 +643,7 @@ export function AddEnvironmentDialog({
                     control={
                       <Autocomplete
                         items={filteredDiscoveredSshHosts}
-                        itemToStringValue={(target) => target.alias}
+                        itemToStringValue={sshHostSuggestionValue}
                         mode="none"
                         openOnInputClick
                         open={sshHostSuggestionsOpen}
@@ -653,7 +658,9 @@ export function AddEnvironmentDialog({
                             ssh: { ...prev.ssh, host: value },
                           }));
                           if (eventDetails.reason !== "item-press") return;
-                          const target = filteredDiscoveredSshHosts.find((h) => h.alias === value);
+                          const target = filteredDiscoveredSshHosts.find(
+                            (h) => sshHostSuggestionValue(h) === value,
+                          );
                           if (target) void handleSelectSshHostSuggestion(target);
                         }}
                       >
