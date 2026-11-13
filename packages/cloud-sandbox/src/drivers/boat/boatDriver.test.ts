@@ -43,6 +43,7 @@ it.effect("resolves the provider endpoint and authenticated host key without fal
       resizeMode: "restart",
       hotResize: false,
       rootAccess: true,
+      machines: driver.machines?.map((machine) => ({ ...machine })),
     });
   }),
 );

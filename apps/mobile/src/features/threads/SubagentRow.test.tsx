@@ -1,7 +1,12 @@
 import type { ReactNode } from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ThreadId,
+} from "@t3tools/contracts";
 import { expect, it, vi } from "vite-plus/test";
 
 vi.mock("react-native", () => ({
@@ -43,13 +48,13 @@ const remoteTask = {
   threadId: ThreadId.make("parent"),
   childThreadId: null,
   model: null,
-  modelSelection: null,
-  driver: "codex",
-  providerInstanceId: "provider",
+  modelSelection: undefined,
+  driver: ProviderDriverKind.make("codex"),
+  providerInstanceId: ProviderInstanceId.make("provider"),
   title: "Run remote task",
   prompt: "Run remote task",
   status: "completed" as const,
-  progress: null,
+  progress: undefined,
   result: null,
   remoteChild: {
     environmentId: EnvironmentId.make("remote-env"),
