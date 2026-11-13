@@ -18,6 +18,7 @@ const reactTests = [
   "src/features/threads/thread-inspector-navigation.test.tsx",
   "src/features/diffs/nativeReviewDiffSurface.test.tsx",
   "src/features/connection/CloudSandboxesSection.test.tsx",
+  "src/features/threads/SubagentRow.test.tsx",
   "src/features/pull-requests/usePullRequestDiff.test.tsx",
   "src/components/ProjectFavicon.test.tsx",
   "src/components/ui/Dialog.android.test.tsx",

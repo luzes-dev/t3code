@@ -398,3 +398,70 @@ it("hides a deleted fork and keeps unloaded and archived forks with their curren
   await expect.element(screen.getByText("Archived fork", { exact: true })).toBeVisible();
   await expect.element(screen.getByText("deleted-fork", { exact: true })).not.toBeInTheDocument();
 });
+
+it("flags a remote subagent running on a degraded follower sandbox in the row and tooltip", async () => {
+  setup();
+  const remoteEnvId = EnvironmentId.make("remote-env");
+  const remoteThreadId = ThreadId.make("remote-thread");
+  const now = DateTime.makeUnsafe("2026-10-31T20:00:00.000Z");
+  state.projection = {
+    ...(state.projection as Record<string, unknown>),
+    subagents: [
+      {
+        id: NodeId.make("remote-agent"),
+        threadId,
+        runId: null,
+        parentNodeId: NodeId.make("parent"),
+        origin: "app_owned",
+        createdBy: "agent",
+        driver: "codex",
+        providerInstanceId: "provider",
+        providerThreadId: null,
+        childThreadId: null,
+        nativeTaskRef: null,
+        prompt: "Run remote task",
+        title: "Fork a repo checkout on a follower",
+        model: null,
+        status: "completed",
+        result: null,
+        startedAt: null,
+        completedAt: null,
+        updatedAt: now,
+        remoteChild: {
+          environmentId: remoteEnvId,
+          threadId: remoteThreadId,
+          label: "Remote VM",
+          sandboxIssue: {
+            cause: "provider-auth",
+            driverKind: "boat",
+            profileId: "boat-demo",
+            message: "The cloud provider could not complete this operation.",
+            firstSeenAt: "2026-11-13T00:00:00.000Z",
+          },
+        },
+      },
+    ],
+  };
+  await using screen = await render(
+    <ThreadRelationshipsPanel
+      environmentId={environmentId}
+      threadId={threadId}
+      showLineage
+      showSideChats={false}
+    />,
+    { router: "/environment/fork" },
+  );
+
+  await screen.getByRole("button", { name: /Previous agents/ }).click();
+  const row = screen.getByRole("button", {
+    name: /Fork a repo checkout on a follower.*on Remote VM · issue/,
+  });
+  await expect.element(row).toBeInTheDocument();
+
+  await userEvent.hover(row);
+  await vi.waitFor(() =>
+    expect(document.querySelector('[data-slot="tooltip-popup"]')?.textContent).toContain(
+      "Cloud token refused: The cloud provider could not complete this operation.",
+    ),
+  );
+});

@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   refresh: vi.fn(),
   profiles: null as null | { readonly profiles: ReadonlyArray<unknown> },
   sandboxes: null as null | ReadonlyArray<unknown>,
+  issues: null as null | ReadonlyArray<unknown>,
   environments: [] as ReadonlyArray<{ readonly environmentId: string }>,
 }));
 
@@ -38,6 +39,9 @@ vi.mock(import("~/connection/cloudSandbox"), async (original) => ({
   }) as never,
   deleteManagedSandbox: mocks.deleteSandbox as never,
   managedSandboxesAtom: ((environmentId: unknown) => ({ sandboxesFor: environmentId })) as never,
+  managedSandboxIssuesAtom: ((environmentId: unknown) => ({
+    issuesFor: environmentId,
+  })) as never,
 }));
 vi.mock(import("~/connection/onboarding"), async (original) => ({
   ...(await original()),
@@ -74,7 +78,9 @@ vi.mock(import("~/state/query"), async (original) => ({
           ? mocks.profiles
           : "sandboxesFor" in query
             ? mocks.sandboxes
-            : null
+            : "issuesFor" in query
+              ? mocks.issues
+              : null
         : null;
     return {
       data,
@@ -124,15 +130,53 @@ const connectedSandbox = {
   recordingIds: [],
 };
 
+const followerIssue = {
+  cause: "provider-auth",
+  driverKind: "boat",
+  profileId: "boat-demo",
+  message: "The cloud provider could not complete this operation.",
+  firstSeenAt: "2026-11-13T00:00:00.000Z",
+};
+
+const failedFollower = {
+  ...connectedSandbox,
+  resourceId: "follower-1",
+  sandboxId: null,
+  phase: "failed",
+  label: "Follower sandbox",
+  owner: { _tag: "task", hostEnvironmentId: "environment-primary-1" },
+  issue: followerIssue,
+};
+
+const failedFollowerTwo = {
+  ...connectedSandbox,
+  resourceId: "follower-2",
+  sandboxId: null,
+  phase: "failed",
+  label: "Second follower",
+  owner: { _tag: "task", hostEnvironmentId: "environment-primary-1" },
+  issue: { ...followerIssue, message: "The peer connection dropped." },
+};
+
+const healthyFollower = {
+  ...connectedSandbox,
+  resourceId: "follower-3",
+  label: "Healthy follower",
+  owner: { _tag: "task", hostEnvironmentId: "environment-primary-1" },
+};
+
 function setup({
   profiles,
   sandboxes,
+  issues = [],
 }: {
   readonly profiles: ReadonlyArray<unknown>;
   readonly sandboxes: ReadonlyArray<unknown>;
+  readonly issues?: ReadonlyArray<unknown>;
 }) {
   mocks.profiles = { profiles };
   mocks.sandboxes = sandboxes;
+  mocks.issues = issues;
   mocks.operation.mockReset();
   mocks.operation.mockResolvedValue(AsyncResult.success(undefined));
   mocks.deleteSandbox.mockReset();
@@ -272,5 +316,55 @@ describe("CloudSandboxesSettings", () => {
       environmentId: "environment-primary-1",
       input: { profileId: "boat-demo" },
     });
+  });
+
+  it("shows one collapsed banner for degraded followers and marks the failing rows", async () => {
+    setup({
+      profiles: [boatProfile],
+      sandboxes: [failedFollower, failedFollowerTwo, healthyFollower],
+      issues: [
+        {
+          key: "boat:boat-demo:provider-auth",
+          cause: "provider-auth",
+          driverKind: "boat",
+          profileId: "boat-demo",
+          message: followerIssue.message,
+          firstSeenAt: followerIssue.firstSeenAt,
+          affectedResourceIds: ["follower-1", "follower-2"],
+        },
+      ],
+    });
+    await using _screen = await render(
+      <AppAtomRegistryProvider>
+        <CloudSandboxesSettings />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect.element(page.getByText("Follower issues")).toBeInTheDocument();
+    // The same describe line appears twice: once on the collapsed banner, once
+    // on the failing follower's own row.
+    expect(
+      await page
+        .getByText("Cloud token refused: The cloud provider could not complete this operation.")
+        .elements(),
+    ).toHaveLength(2);
+    await expect
+      .element(page.getByText(/^2 follower sandboxes affected since/))
+      .toBeInTheDocument();
+    // The second failing follower's row shows its own issue line only.
+    expect(
+      await page.getByText("Cloud token refused: The peer connection dropped.").elements(),
+    ).toHaveLength(1);
+  });
+
+  it("omits the follower-issues banner when nothing is degraded", async () => {
+    setup({ profiles: [boatProfile], sandboxes: [healthyFollower] });
+    await using _screen = await render(
+      <AppAtomRegistryProvider>
+        <CloudSandboxesSettings />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect.element(page.getByText("Follower issues")).not.toBeInTheDocument();
   });
 });
