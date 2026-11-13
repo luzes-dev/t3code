@@ -96,9 +96,38 @@ on rollback, never records.
   authenticated sessions as before; hiding followers from pickers changes
   presentation only.
 
-## Unverified in CI
+## Live verification (2026-11-12/13)
 
-Paid Boat.dev provisioning, real SSH transport, desktop/mobile rendering of
-an owned workspace, and live reconciliation against a second provider are
-exercised neither locally nor in CI here; the unit suites cover allocation,
-binding, decode compatibility, and sweep behavior against driver fixtures.
+The degraded-reporting life cycle was exercised end to end against a scratch
+controller and a real Boat.dev account (small VMs, 30-minute auto-stop):
+
+- **Task-owned bind** — a forked VM bound to a task owner carries the owner on
+  its record. A refused rebind to a different task (HTTP 403) stays user-visible
+  as `issue {cause: "bind"}` while the sandbox keeps running and stays owned by
+  its original task.
+- **Clear on recovery** — disconnecting and reconnecting that VM with valid
+  credentials erased the issue on the next successful connect.
+- **Dead token** — provisioning with a corrupted profile key produced a
+  `failed` record with `issue {cause: "provider-auth"}` and `sandboxId: null`:
+  no VM allocated, no billing, one visible diagnostic instead of a silent hang.
+- **Lost connectivity** — killing the VM's reverse-proxy tunnel and blocking the
+  controller's SSH identity stamped `issue {cause: "connectivity"}` on a still
+  running, provider-healthy VM; restoring access reconnected within one
+  reconciliation tick and cleared the issue.
+- **Render coverage** — the Settings roll-up banner (cause label, plural
+  affected count, per-row issue lines), the relationships row's degraded pill
+  and tooltip, and the mobile task-row issue suffix are covered by web browser
+  and react tests (`910654cf17`).
+
+Operational note from the run: follower deletes hold the record lock for
+60-70 seconds (reverse-proxy teardown), so scripted delete calls need generous
+timeouts.
+
+## Verified against drivers (not CI)
+
+Paid Boat.dev provisioning, real SSH transport, and the degradation life cycle
+above ran live and are repeatable only by hand; the unit suites still cover
+allocation, binding, decode compatibility, and sweep behavior against driver
+fixtures. Desktop rendering of an owned workspace and live reconciliation
+against a second provider remain unexercised, as does physical-device mobile
+behavior (the management component has automated coverage).
