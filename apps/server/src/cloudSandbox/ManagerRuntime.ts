@@ -146,10 +146,6 @@ export const isDeletedOrDeleting = (record: Store.CloudSandboxRecord) =>
 export const isConnectIntent = (record: Store.CloudSandboxRecord) =>
   record.lifecycle === "active" && record.power === "running" && record.intent === "connected";
 
-// The user asked for no connection, but the provider can still stop the VM; track it for display and the cap.
-export const isDisconnectedButRunning = (record: Store.CloudSandboxRecord) =>
-  record.lifecycle === "active" && record.power === "running" && record.intent === "disconnected";
-
 export const makeManagerRuntime = Effect.fn("CloudSandboxManager.makeRuntime")(function* (
   renewalsEnabled: boolean,
 ) {
@@ -173,6 +169,7 @@ export const makeManagerRuntime = Effect.fn("CloudSandboxManager.makeRuntime")(f
   const publicResource = (record: Store.CloudSandboxRecord): ManagedCloudSandboxResource => {
     const {
       selection: _selection,
+      reservation: _reservation,
       snapshotName: _snapshotName,
       snapshotReady: _snapshotReady,
       deletionOperationId: _deletionOperationId,

@@ -76,7 +76,7 @@ export function EnvironmentTypeGrid({
         disabled={disabled}
         {...labelProps}
       >
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className={remoteSshOptions.length > 1 ? "grid gap-3 sm:grid-cols-2" : "grid gap-3"}>
           {remoteSshOptions.map((option) => (
             <RadioPrimitive.Root
               key={option.id}

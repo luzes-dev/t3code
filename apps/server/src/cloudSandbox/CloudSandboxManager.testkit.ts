@@ -146,7 +146,6 @@ export const fixture = (
       }),
     withConnection: () => Effect.die("not used"),
     pairingToken: () => Effect.succeed("fresh-peer-token"),
-    forgetHostKey: () => Effect.void,
   });
   const client = HttpClient.make((request) => {
     requests++;

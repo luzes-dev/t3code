@@ -16,7 +16,13 @@ import {
 } from "@t3tools/contracts";
 import * as Store from "./CloudSandboxStore.ts";
 import * as FollowerHostSettings from "./FollowerHostSettingsLedger.ts";
-import { isDeletedOrDeleting, toError, type ManagerRuntime } from "./ManagerRuntime.ts";
+import {
+  isDeletedOrDeleting,
+  toError,
+  stampBindIssue,
+  withoutIssue,
+  type ManagerRuntime,
+} from "./ManagerRuntime.ts";
 import type { ManagerAllocation } from "./ManagerAllocation.ts";
 import type { ManagerConnections } from "./ManagerConnections.ts";
 
@@ -41,43 +47,48 @@ export const makeControl = (
     requireRecord,
     requireSandbox,
     driverFor,
+    resolveProfile,
   } = rt;
   const { sourceContext, connectUnlocked, disconnectUnlocked } = connections;
-  const { fork, release, reserveResume } = allocation;
+  const { fork, release, reserveResume, reserveAllocation } = allocation;
   const ownerEquivalence = Schema.toEquivalence(ManagedSandboxOwner);
   /** Stamps ownership onto an unbound or identically-owned record. The host id
    * is always derived by the controller; callers never assert it. */
-  const bindOwnerLocked = Effect.fn("CloudSandboxManager.bindOwnerLocked")(function* (
-    id: ManagedCloudSandboxResourceId,
-    owner: ManagedSandboxFollowerOwner,
-    hostEnvironmentId: EnvironmentId,
-    retention?: ManagedSandboxRetention | undefined,
-  ) {
-    const record = yield* requireRecord(id);
-    if (isDeletedOrDeleting(record))
-      return yield* new Store.CloudSandboxManagerError({ reason: "conflict" });
-    // The host identity comes from the record's controller, not the caller.
-    const canonical: ManagedSandboxOwner =
-      owner._tag === "thread"
-        ? { _tag: "thread", hostEnvironmentId, threadId: owner.threadId }
-        : {
-            _tag: "task",
-            hostEnvironmentId,
-            sourceThreadId: owner.sourceThreadId,
-            taskId: owner.taskId,
-          };
-    // Rebinding to a different owner is refused: one task cannot take over
-    // another's sandbox, and a retry with the same owner stays idempotent.
-    if (record.owner._tag !== "user" && !ownerEquivalence(record.owner, canonical))
-      return yield* new Store.CloudSandboxManagerError({ reason: "ownership" });
-    const next: Store.CloudSandboxRecord = {
-      ...record,
-      owner: canonical,
-      retention: retention ?? retentionForOwner(canonical),
-    };
-    yield* store.save(next);
-    return publicResource(next);
-  });
+  const bindOwnerLocked = Effect.fn("CloudSandboxManager.bindOwnerLocked")(
+    function* (
+      id: ManagedCloudSandboxResourceId,
+      owner: ManagedSandboxFollowerOwner,
+      hostEnvironmentId: EnvironmentId,
+      retention?: ManagedSandboxRetention | undefined,
+    ) {
+      const record = yield* requireRecord(id);
+      if (isDeletedOrDeleting(record))
+        return yield* new Store.CloudSandboxManagerError({ reason: "conflict" });
+      // The host identity comes from the record's controller, not the caller.
+      const canonical: ManagedSandboxOwner =
+        owner._tag === "thread"
+          ? { _tag: "thread", hostEnvironmentId, threadId: owner.threadId }
+          : {
+              _tag: "task",
+              hostEnvironmentId,
+              sourceThreadId: owner.sourceThreadId,
+              taskId: owner.taskId,
+            };
+      // Rebinding to a different owner is refused: one task cannot take over
+      // another's sandbox, and a retry with the same owner stays idempotent.
+      if (record.owner._tag !== "user" && !ownerEquivalence(record.owner, canonical))
+        return yield* new Store.CloudSandboxManagerError({ reason: "ownership" });
+      const next: Store.CloudSandboxRecord = {
+        ...record,
+        owner: canonical,
+        retention: retention ?? retentionForOwner(canonical),
+      };
+      const bound = next.issue?.cause === "bind" ? withoutIssue(next) : next;
+      yield* store.save(bound);
+      return publicResource(bound);
+    },
+    (effect, id) => effect.pipe(Effect.tapError((error) => stampBindIssue(store, id, error))),
+  );
   const executeUnlocked = Effect.fn("CloudSandboxManager.execute")(function* (
     id: ManagedCloudSandboxResourceId,
     operation: ManagedCloudSandboxControlOperation,
@@ -119,7 +130,7 @@ export const makeControl = (
         const status = yield* driver.get(sandboxId).pipe(Effect.mapError(toError));
         if (status.state === "stopped")
           yield* driver.resume(sandboxId).pipe(Effect.mapError(toError));
-        yield* store.save({ ...record, power: "running", intent: "connected" });
+        yield* store.save({ ...(yield* requireRecord(id)), power: "running", intent: "connected" });
         yield* connectUnlocked(id, true);
         return {
           _tag: "status",
@@ -139,17 +150,33 @@ export const makeControl = (
               : driver.streaming.getDesktopStreamSession(sandboxId)
           ).pipe(Effect.mapError(toError)),
         };
-      case "extend":
+      case "extend": {
         if (!renewalsEnabled)
           return yield* new Store.CloudSandboxManagerError({ reason: "ownership" });
         if (!driver.keepalive) return yield* unsupported();
+        const { profile } = yield* resolveProfile(record.profileId);
+        const reserved = yield* reserveAllocation(
+          profile,
+          record.selection.size,
+          operation.hours * 60,
+          record,
+        );
+        const sandbox = yield* driver.keepalive
+          .extendAutoStop(sandboxId, operation.hours)
+          .pipe(Effect.mapError(toError));
+        yield* store.save({
+          ...reserved,
+          reservation: {
+            ...reserved.reservation,
+            autoStopMinutes: Math.ceil(operation.hours * 60),
+          },
+        });
         return {
           _tag: "status",
-          sandbox: yield* driver.keepalive
-            .extendAutoStop(sandboxId, operation.hours)
-            .pipe(Effect.mapError(toError)),
+          sandbox,
           capabilities: cloudSandboxCapabilities(driver),
         };
+      }
       case "host":
         if (
           !Number.isInteger(operation.port) ||
@@ -204,16 +231,64 @@ export const makeControl = (
             .stop(sandboxId, operation.recordingId)
             .pipe(Effect.mapError(toError)),
         };
-      case "resize":
+      case "resize": {
         if (!driver.resizing) return yield* unsupported();
+        const { profile } = yield* resolveProfile(record.profileId);
+        const resized = {
+          ...record,
+          power: "running",
+        } satisfies Store.CloudSandboxRecord;
+        yield* reserveAllocation(
+          profile,
+          operation.size,
+          Math.max(record.selection.autoStopMinutes, record.reservation?.autoStopMinutes ?? 0),
+          resized,
+        );
         yield* disconnectUnlocked(id);
+        const sandbox = yield* driver.resizing.resize(sandboxId, operation.size).pipe(
+          Effect.tapError(() =>
+            driver.get(sandboxId).pipe(
+              Effect.flatMap((observed) =>
+                Effect.gen(function* () {
+                  const current = yield* requireRecord(id);
+                  yield* store.save({
+                    ...current,
+                    selection: {
+                      ...current.selection,
+                      size: observed.size ?? current.selection.size,
+                    },
+                    reservation: {
+                      size: observed.size ?? current.reservation?.size ?? current.selection.size,
+                      autoStopMinutes:
+                        current.reservation?.autoStopMinutes ?? current.selection.autoStopMinutes,
+                    },
+                    power: observed.state === "stopped" ? "stopped" : "running",
+                  });
+                }),
+              ),
+              Effect.ignore,
+            ),
+          ),
+          Effect.mapError(toError),
+        );
+        const current = yield* requireRecord(id);
+        yield* store.save({
+          ...current,
+          selection: { ...current.selection, size: sandbox.size ?? operation.size },
+          reservation: {
+            size: sandbox.size ?? operation.size,
+            autoStopMinutes:
+              current.reservation?.autoStopMinutes ?? current.selection.autoStopMinutes,
+          },
+          power: sandbox.state === "stopped" ? "stopped" : "running",
+        });
+        yield* connectUnlocked(id, false);
         return {
           _tag: "status",
-          sandbox: yield* driver.resizing
-            .resize(sandboxId, operation.size)
-            .pipe(Effect.mapError(toError)),
+          sandbox,
           capabilities: cloudSandboxCapabilities(driver),
         };
+      }
     }
   });
 
@@ -269,7 +344,10 @@ export const makeControl = (
           result: yield* execute(id, { _tag: "host", port: operation.port, isPublic: false }),
         };
       case "fork": {
-        const created = yield* fork({ ...operation, sourceResourceId: id });
+        const created = yield* fork(
+          { ...operation, sourceResourceId: id },
+          { inheritOwner: false },
+        );
         return {
           _tag: "connection",
           connection: created.connection,

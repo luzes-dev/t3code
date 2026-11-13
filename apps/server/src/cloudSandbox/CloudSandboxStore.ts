@@ -66,6 +66,12 @@ export const CloudSandboxRecord = Schema.Struct({
   power: Schema.Literals(["running", "stopped"]),
   intent: Schema.Literals(["connected", "disconnected"]),
   selection: ManagedCloudSandboxProvisionInput.fields.sandbox,
+  reservation: Schema.optionalKey(
+    Schema.Struct({
+      size: ManagedCloudSandboxProvisionInput.fields.sandbox.fields.size,
+      autoStopMinutes: ManagedCloudSandboxProvisionInput.fields.sandbox.fields.autoStopMinutes,
+    }),
+  ),
   snapshotName: Schema.NullOr(Schema.String),
   snapshotReady: Schema.Boolean,
   deletionOperationId: Schema.NullOr(Schema.String),

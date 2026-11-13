@@ -11,6 +11,7 @@ import {
   describeCloudSandbox,
   describeCloudSandboxProfile,
   describeManagedCloudSandboxIssue,
+  managedSandboxIssueRecovery,
   offersCloudSandboxControl,
   parseSandboxProfileLimits,
   type ManagedCloudSandboxIssueRollup,
@@ -40,6 +41,7 @@ import { Input } from "../ui/input";
 import { ITEM_ROW_CLASSNAME, ITEM_ROW_INNER_CLASSNAME } from "./itemRows";
 import { SettingsSection } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
+import { SecretInput } from "./SecretInput";
 
 /** Hidden until the server has a profile or a sandbox, so users who never set this up see nothing. */
 export function CloudSandboxesSettings() {
@@ -120,8 +122,10 @@ function FollowerIssueBanner({ issue }: { readonly issue: ManagedCloudSandboxIss
             {affected > 1
               ? `${issue.affectedResourceIds.length} follower sandboxes`
               : "1 follower sandbox"}{" "}
-            affected since {new Date(issue.firstSeenAt).toLocaleString()}. The fix belongs to the
-            controller host's cloud profile: sign in again from a profile row above.
+            affected since {new Date(issue.firstSeenAt).toLocaleString()}.
+          </p>
+          <p className="text-xs text-muted-foreground">
+            {managedSandboxIssueRecovery(issue.cause)}
           </p>
         </div>
       </div>
@@ -147,10 +151,12 @@ function SandboxProfileRow({
   const [budget, setBudget] = useState("");
   const [concurrent, setConcurrent] = useState("");
   const [template, setTemplate] = useState("");
+  const [apiKey, setApiKey] = useState("");
   const [pending, setPending] = useState<"save" | "remove" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const startEditing = () => {
+    setApiKey("");
     setBudget(profile.monthlyBudgetUsd === null ? "" : String(profile.monthlyBudgetUsd));
     setConcurrent(String(profile.maxConcurrentSandboxes));
     setTemplate(profile.template ?? "");
@@ -179,14 +185,21 @@ function SandboxProfileRow({
         driverKind: profile.driverKind,
         defaultSize: profile.defaultSize,
         autoStopMinutes: profile.autoStopMinutes,
+        ...(apiKey.trim() === "" ? {} : { apiKey: apiKey.trim() }),
         ...limits.success,
       },
     });
     setPending(null);
     if (result._tag === "Failure") {
-      setError(cloudSandboxFailureMessage(result, "Could not save the sandbox profile."));
+      const message = cloudSandboxFailureMessage(result, "Could not save the sandbox profile.");
+      setError(
+        message !== null && apiKey.trim() !== ""
+          ? `${message} Check the replacement API key and connection, then try again.`
+          : message,
+      );
       return;
     }
+    setApiKey("");
     setEditing(false);
   };
 
@@ -249,6 +262,16 @@ function SandboxProfileRow({
             void save();
           }}
         >
+          <label className="block space-y-1.5 sm:col-span-3">
+            <span className="block text-xs font-medium text-foreground">Replacement API key</span>
+            <SecretInput
+              size="sm"
+              value={apiKey}
+              onChange={(event) => setApiKey(event.target.value)}
+              placeholder="Leave blank to keep the saved key"
+              disabled={pending !== null}
+            />
+          </label>
           <label className="block space-y-1.5">
             <span className="block text-xs font-medium text-foreground">Monthly budget</span>
             <Input
@@ -295,7 +318,10 @@ function SandboxProfileRow({
               size="xs"
               variant="outline"
               disabled={pending !== null}
-              onClick={() => setEditing(false)}
+              onClick={() => {
+                setApiKey("");
+                setEditing(false);
+              }}
             >
               Cancel
             </Button>

@@ -1,5 +1,6 @@
 import { MANAGED_CLOUD_SOURCE_PORT, type ManagedCloudSandboxResourceId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -35,121 +36,133 @@ export const make = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const net = yield* Net.NetService;
   const sshCommand = yield* resolveSshCommand;
-  const forwards = new Map<string, { port: number; scope: Scope.Closeable }>();
+  const forwards = new Map<string, { port: number; scope: Scope.Closeable; users: number }>();
+  const locks = yield* KeyedLock.make<ManagedCloudSandboxResourceId>();
   const client = yield* HttpClient.HttpClient;
   return CloudSandboxPreview.of({
-    open: Effect.fn("CloudSandboxPreview.open")(function* (input) {
-      const url = yield* Effect.try({
-        try: () => new URL(input.url),
-        catch: () => new CloudSandboxManagerError({ reason: "ownership" }),
-      });
-      if (input.close) {
-        for (const [key, forward] of forwards) {
-          if (
-            key.startsWith(`${input.resourceId}:`) &&
-            url.hostname === "127.0.0.1" &&
-            Number(url.port) === forward.port
-          ) {
-            yield* Scope.close(forward.scope, Exit.void);
-            return { url: input.url };
+    open: Effect.fn("CloudSandboxPreview.open")(
+      function* (input) {
+        const url = yield* Effect.try({
+          try: () => new URL(input.url),
+          catch: () => new CloudSandboxManagerError({ reason: "ownership" }),
+        });
+        if (input.close) {
+          for (const [key, forward] of forwards) {
+            if (
+              key.startsWith(`${input.resourceId}:`) &&
+              url.hostname === "127.0.0.1" &&
+              Number(url.port) === forward.port
+            ) {
+              if (forward.users > 1) forward.users--;
+              else yield* Scope.close(forward.scope, Exit.void);
+              return { url: input.url };
+            }
           }
+          return { url: input.url };
         }
-        return { url: input.url };
-      }
-      const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
-      if (
-        !["http:", "https:"].includes(url.protocol) ||
-        !["localhost", "127.0.0.1", "[::1]", "0.0.0.0"].includes(url.hostname) ||
-        url.username ||
-        url.password ||
-        port === MANAGED_CLOUD_SOURCE_PORT
-      )
-        return yield* new CloudSandboxManagerError({ reason: "ownership" });
-      const route = yield* manager.route(input.resourceId);
-      if (port === Number(new URL(route.httpBaseUrl).port))
-        return yield* new CloudSandboxManagerError({ reason: "ownership" });
-      const response = yield* client
-        .execute(
-          HttpClientRequest.get(
-            new URL("/api/cloud-sandboxes/preview-ports", route.httpBaseUrl).toString(),
-          ).pipe(HttpClientRequest.bearerToken(route.connection.bearerToken)),
+        const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
+        if (
+          !["http:", "https:"].includes(url.protocol) ||
+          !["localhost", "127.0.0.1", "[::1]", "0.0.0.0"].includes(url.hostname) ||
+          url.username ||
+          url.password ||
+          port === MANAGED_CLOUD_SOURCE_PORT
         )
-        .pipe(Effect.mapError(() => new CloudSandboxManagerError({ reason: "transport" })));
-      if (response.status !== 200)
-        return yield* new CloudSandboxManagerError({ reason: "ownership" });
-      const ports = yield* response.json.pipe(
-        Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(Schema.Int))),
-        Effect.mapError(() => new CloudSandboxManagerError({ reason: "ownership" })),
-      );
-      if (!ports.includes(port))
-        return yield* new CloudSandboxManagerError({ reason: "ownership" });
-      if (input.access === "local") {
-        const localPort = yield* manager
-          .withConnection(input.resourceId, (target) =>
-            Effect.gen(function* () {
-              const reserved = yield* net.reserveLoopbackPort();
-              const key = `${input.resourceId}:${reserved}`;
-              const args = [
-                ...baseSshArgs(target, { batchMode: "yes" }),
-                "-o",
-                "ExitOnForwardFailure=yes",
-                "-o",
-                "ServerAliveInterval=15",
-                "-o",
-                "ServerAliveCountMax=3",
-                "-N",
-                "-L",
-                `127.0.0.1:${reserved}:127.0.0.1:${port}`,
-                "--",
-                yield* buildSshHostSpecEffect(target),
-              ];
-              const scope = yield* Scope.fork(yield* Scope.Scope);
-              yield* spawner
-                .spawn(ChildProcess.make(sshCommand, args))
-                .pipe(Effect.provideService(Scope.Scope, scope));
-              yield* waitForHttpReady({
-                baseUrl: `${url.protocol}//127.0.0.1:${reserved}`,
-                timeoutMs: 10_000,
-                makeError: () => new CloudSandboxManagerError({ reason: "transport" }),
-              }).pipe(
-                Effect.provideService(HttpClient.HttpClient, client),
-                Effect.onExit((exit) =>
-                  Exit.isFailure(exit) ? Scope.close(scope, Exit.void) : Effect.void,
-                ),
-              );
-              forwards.set(key, { port: reserved, scope });
-              yield* Effect.addFinalizer(() =>
-                Effect.sync(() => {
-                  forwards.delete(key);
-                }),
-              ).pipe(Effect.provideService(Scope.Scope, scope));
-              return reserved;
-            }),
+          return yield* new CloudSandboxManagerError({ reason: "ownership" });
+        const route = yield* manager.route(input.resourceId);
+        if (port === Number(new URL(route.httpBaseUrl).port))
+          return yield* new CloudSandboxManagerError({ reason: "ownership" });
+        const response = yield* client
+          .execute(
+            HttpClientRequest.get(
+              new URL("/api/cloud-sandboxes/preview-ports", route.httpBaseUrl).toString(),
+            ).pipe(HttpClientRequest.bearerToken(route.connection.bearerToken)),
           )
           .pipe(Effect.mapError(() => new CloudSandboxManagerError({ reason: "transport" })));
-        url.hostname = "127.0.0.1";
-        url.port = String(localPort);
-        return { url: url.toString() };
-      }
-      const hosted = yield* manager.execute(input.resourceId, {
-        _tag: "host",
-        port,
-        isPublic: false,
-      });
-      if (hosted._tag !== "host" || hosted.port.isPublic)
-        return yield* new CloudSandboxManagerError({ reason: "provider" });
-      const target = yield* Effect.try({
-        try: () => new URL(hosted.port.url),
-        catch: () => new CloudSandboxManagerError({ reason: "provider" }),
-      });
-      if (target.protocol !== "https:" || isPrivateNetworkHost(target.hostname))
-        return yield* new CloudSandboxManagerError({ reason: "provider" });
-      target.pathname = `${target.pathname.replace(/\/$/u, "")}${url.pathname}`;
-      // Provider access tokens and the application's query both belong in the opened URL.
-      for (const [key, value] of url.searchParams) target.searchParams.append(key, value);
-      target.hash = url.hash;
-      return { url: target.toString() };
-    }),
+        if (response.status !== 200)
+          return yield* new CloudSandboxManagerError({ reason: "ownership" });
+        const ports = yield* response.json.pipe(
+          Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(Schema.Int))),
+          Effect.mapError(() => new CloudSandboxManagerError({ reason: "ownership" })),
+        );
+        if (!ports.includes(port))
+          return yield* new CloudSandboxManagerError({ reason: "ownership" });
+        if (input.access === "local") {
+          const key = `${input.resourceId}:${url.protocol}:${port}`;
+          const existing = forwards.get(key);
+          if (existing !== undefined) {
+            existing.users++;
+            url.hostname = "127.0.0.1";
+            url.port = String(existing.port);
+            return { url: url.toString() };
+          }
+          const localPort = yield* manager
+            .withConnection(input.resourceId, (target) =>
+              Effect.gen(function* () {
+                const reserved = yield* net.reserveLoopbackPort();
+                const args = [
+                  ...baseSshArgs(target, { batchMode: "yes" }),
+                  "-o",
+                  "ExitOnForwardFailure=yes",
+                  "-o",
+                  "ServerAliveInterval=15",
+                  "-o",
+                  "ServerAliveCountMax=3",
+                  "-N",
+                  "-L",
+                  `127.0.0.1:${reserved}:127.0.0.1:${port}`,
+                  "--",
+                  yield* buildSshHostSpecEffect(target),
+                ];
+                const scope = yield* Scope.fork(yield* Scope.Scope);
+                yield* spawner
+                  .spawn(ChildProcess.make(sshCommand, args))
+                  .pipe(Effect.provideService(Scope.Scope, scope));
+                yield* waitForHttpReady({
+                  baseUrl: `${url.protocol}//127.0.0.1:${reserved}`,
+                  timeoutMs: 10_000,
+                  makeError: () => new CloudSandboxManagerError({ reason: "transport" }),
+                }).pipe(
+                  Effect.provideService(HttpClient.HttpClient, client),
+                  Effect.onExit((exit) =>
+                    Exit.isFailure(exit) ? Scope.close(scope, Exit.void) : Effect.void,
+                  ),
+                );
+                forwards.set(key, { port: reserved, scope, users: 1 });
+                yield* Effect.addFinalizer(() =>
+                  Effect.sync(() => {
+                    forwards.delete(key);
+                  }),
+                ).pipe(Effect.provideService(Scope.Scope, scope));
+                return reserved;
+              }),
+            )
+            .pipe(Effect.mapError(() => new CloudSandboxManagerError({ reason: "transport" })));
+          url.hostname = "127.0.0.1";
+          url.port = String(localPort);
+          return { url: url.toString() };
+        }
+        const hosted = yield* manager.execute(input.resourceId, {
+          _tag: "host",
+          port,
+          isPublic: false,
+        });
+        if (hosted._tag !== "host" || hosted.port.isPublic)
+          return yield* new CloudSandboxManagerError({ reason: "provider" });
+        const target = yield* Effect.try({
+          try: () => new URL(hosted.port.url),
+          catch: () => new CloudSandboxManagerError({ reason: "provider" }),
+        });
+        if (target.protocol !== "https:" || isPrivateNetworkHost(target.hostname))
+          return yield* new CloudSandboxManagerError({ reason: "provider" });
+        target.pathname = `${target.pathname.replace(/\/$/u, "")}${url.pathname}`;
+        // Provider access tokens and the application's query both belong in the opened URL.
+        for (const [key, value] of url.searchParams) target.searchParams.append(key, value);
+        target.hash = url.hash;
+        return { url: target.toString() };
+      },
+      (effect, input) => locks.withLock(input.resourceId, effect),
+    ),
   });
 });
 export const layer = Layer.effect(CloudSandboxPreview, make);

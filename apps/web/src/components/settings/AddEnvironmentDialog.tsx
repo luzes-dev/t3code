@@ -63,6 +63,7 @@ import {
 } from "./ConnectionsSettings.logic";
 import {
   createInitialEnvironmentWizardDraft,
+  cloudDriverDisplayName,
   getWizardStepsForType,
   resolveEnvironmentWizardNavigation,
   type EnvironmentType,
@@ -542,11 +543,19 @@ export function AddEnvironmentDialog({
       </Tooltip>
       <WizardPopup size="wide">
         <WizardHeader
-          title={routeTarget ? `Add a route to ${routeTarget.label}` : "Add Environment"}
+          title={
+            routeTarget
+              ? `Add a route to ${routeTarget.label}`
+              : draft.type === "cloudSandbox"
+                ? `Set up ${cloudDriverDisplayName(draft.cloudSandbox.driverKind)}`
+                : "Add environment"
+          }
           description={
             routeTarget
               ? "Pair this machine again over another address, such as its Tailscale name. It joins the existing routes instead of adding a second machine."
-              : "Connect an environment with remote pairing, SSH, or a cloud sandbox."
+              : draft.type === "cloudSandbox"
+                ? "Save a cloud profile for agent workspaces. No machine is created during setup."
+                : "Connect another machine, or configure a cloud provider for agent workspaces."
           }
         >
           <WizardSteps
@@ -813,14 +822,19 @@ export function AddEnvironmentDialog({
             wizardStep === 0 ? (
               <Button
                 variant="ghost-muted"
-                size="sm"
+                size={draft.type === "cloudSandbox" ? "comfortable" : "sm"}
                 disabled={busy}
                 onClick={() => handleOpenChange(false)}
               >
                 Cancel
               </Button>
             ) : (
-              <Button variant="outline" size="sm" disabled={busy} onClick={handleBack}>
+              <Button
+                variant="outline"
+                size={draft.type === "cloudSandbox" ? "comfortable" : "sm"}
+                disabled={busy}
+                onClick={handleBack}
+              >
                 Back
               </Button>
             )
@@ -828,7 +842,7 @@ export function AddEnvironmentDialog({
         >
           {!isLastStep ? (
             <Button
-              size="sm"
+              size={draft.type === "cloudSandbox" ? "comfortable" : "sm"}
               onClick={() => void handleNext()}
               disabled={busy || isCheckingProfile}
             >
@@ -842,7 +856,11 @@ export function AddEnvironmentDialog({
               )}
             </Button>
           ) : (
-            <Button size="sm" disabled={busy} onClick={() => void handleConnect()}>
+            <Button
+              size={draft.type === "cloudSandbox" ? "comfortable" : "sm"}
+              disabled={busy}
+              onClick={() => void handleConnect()}
+            >
               {draft.type === "cloudSandbox" ? (
                 busy ? (
                   <>
@@ -850,7 +868,7 @@ export function AddEnvironmentDialog({
                     Saving…
                   </>
                 ) : (
-                  "Finish"
+                  "Save profile"
                 )
               ) : isConnecting ? (
                 <>

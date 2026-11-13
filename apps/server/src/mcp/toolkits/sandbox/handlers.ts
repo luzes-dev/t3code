@@ -15,14 +15,14 @@ const handlers = {
       }),
     { linkedCallers: "allowed" },
   ),
-  t3_worktree_run_sandbox_setup: McpToolAccess.writes(
+  t3_worktree_run_sandbox_setup: McpToolAccess.writesThreads(
+    (input) => [input.threadId],
     (input) =>
       Effect.gen(function* () {
         const scope = yield* McpInvocationContext.McpInvocationContext;
         const service = yield* WorktreeMcpService.WorktreeMcpService;
         return yield* service.runSandboxSetup(scope, input.projectId, input.threadId);
       }),
-    { linkedCallers: "allowed" },
   ),
   preview_share: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {

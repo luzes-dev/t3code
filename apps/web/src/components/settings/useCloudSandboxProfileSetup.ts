@@ -71,7 +71,7 @@ export function useCloudSandboxProfileSetup({
       if (!isAtomCommandInterrupted(result)) {
         const failure = squashAtomCommandFailure(result);
         onError(
-          failure instanceof Error ? failure.message : "Could not validate the sandbox credential.",
+          `${failure instanceof Error ? failure.message : "Could not validate the sandbox credential."} Check your API key and connection, then try again.`,
         );
       }
       return false;

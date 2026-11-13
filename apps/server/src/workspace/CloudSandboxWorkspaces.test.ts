@@ -6,6 +6,7 @@ import {
   EnvironmentId,
   ProjectId,
   ManagedCloudSandboxResourceId,
+  ManagedCloudSandboxSourceOperation,
   type ManagedCloudSandboxIssue,
   type ManagedCloudSandboxResource,
   type Project,
@@ -20,6 +21,8 @@ import {
   type OrchestrationV2StoredEvent,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import * as DateTime from "effect/DateTime";
 import * as FileSystem from "effect/FileSystem";
@@ -31,6 +34,7 @@ import * as Stream from "effect/Stream";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Sqlite from "../persistence/Sqlite.ts";
 import * as Threads from "../orchestration-v2/ThreadManagementService.ts";
+import { OrchestratorDispatchError } from "../orchestration-v2/Orchestrator.ts";
 import * as Projects from "../project/ProjectService.ts";
 import * as Links from "../peer/PeerLinks.ts";
 import * as Forwarding from "../peer/PeerForwarding.ts";
@@ -48,6 +52,10 @@ import * as Setup from "../project/ProjectSetupScriptRunner.ts";
 import * as ProjectTransfer from "./CloudSandboxProjectTransfer.ts";
 import * as Workspaces from "./CloudSandboxWorkspaces.ts";
 import type { McpThreadInvocationScope } from "../mcp/McpInvocationContext.ts";
+
+const decodeSourceOperation = Schema.decodeUnknownSync(
+  Schema.fromJsonString(ManagedCloudSandboxSourceOperation),
+);
 
 const scope: McpThreadInvocationScope = {
   environmentId: EnvironmentId.make("source"),
@@ -609,10 +617,35 @@ it.effect(
     let receivedExecution:
       | Parameters<Delegation.RemoteDelegation["Service"]["delegateWorkspace"]>[1]
       | undefined;
-    let controllerCalls = 0;
+    let bindAvailable = false;
+    let allocations = 0;
+    let issue: ManagedCloudSandboxIssue | undefined;
+    const resource = {
+      ...connection,
+      profileId: "boat",
+      parentResourceId: "source",
+      owner: { _tag: "user" },
+      retention: "manual",
+      phase: "connected",
+      recordingIds: [],
+    };
     const client = HttpClient.make((request) =>
       Effect.sync(() => {
-        controllerCalls++;
+        if (request.body._tag !== "Uint8Array") throw new Error("Missing controller request");
+        const operation = decodeSourceOperation(new TextDecoder().decode(request.body.body));
+        if (operation._tag === "get")
+          return HttpClientResponse.fromWeb(request, Response.json({ _tag: "resource", resource }));
+        if (operation._tag === "bindOwner")
+          return HttpClientResponse.fromWeb(
+            request,
+            bindAvailable
+              ? Response.json({
+                  _tag: "resource",
+                  resource: { ...resource, owner: operation.owner, retention: operation.retention },
+                })
+              : Response.json({ error: "unavailable" }, { status: 503 }),
+          );
+        allocations++;
         return HttpClientResponse.fromWeb(
           request,
           Response.json({ _tag: "connection", connection, pairingToken: "fresh" }),
@@ -639,7 +672,16 @@ it.effect(
     const baseDependencies = Layer.mergeAll(
       Sqlite.layerMemory,
       Layer.mock(Threads.ThreadManagementService)({
-        getThreadRecords: () => Effect.succeed(parent),
+        getThreadRecords: () =>
+          Effect.succeed({
+            ...parent,
+            subagents: [{ ...remoteTaskCard(issue), id: NodeId.make("task") }],
+          }),
+        dispatch: (command) =>
+          Effect.sync(() => {
+            if (command.type === "delegated_task.remote.issue") issue = command.issue;
+            return { sequence: 1, storedEvents: [] };
+          }),
         getThreadShell: () => Effect.succeed(shell),
       }),
       Layer.mock(Projects.ProjectService)({ getById: () => Effect.succeedSome(project) }),
@@ -707,14 +749,15 @@ it.effect(
         });
         expect(receivedExecution?.runtimeMode).toBe(input.runtimeMode);
         expect(receivedExecution?.interactionMode).toBe(input.interactionMode);
+        expect(issue?.cause).toBe("bind");
+        bindAvailable = true;
         expect(yield* workspaces.delegateSandboxTask(scope, input)).toEqual(result);
-        // The fork and the follow-up owner bind each make one controller call.
-        expect(controllerCalls).toBe(2);
+        expect(issue).toBeUndefined();
+        expect(allocations).toBe(1);
         const reused = yield* workspaces
           .delegateSandboxTask(scope, { ...input, task: "Inspect something else" })
           .pipe(Effect.flip);
         expect(reused.message).toContain("already belongs to another request");
-        expect(controllerCalls).toBe(2);
       }).pipe(
         Effect.provide(
           Workspaces.layer.pipe(Layer.provideMerge(dependencies), Layer.provide(Controller.layer)),
@@ -845,6 +888,7 @@ it.effect(
         ]),
       }),
       Layer.mock(Manager.CloudSandboxManager)({
+        get: () => Effect.fail(new CloudSandboxManagerError({ reason: "not-found" })),
         provision: (request) =>
           Effect.sync(() => {
             provisionedLinkedEnvironments = request.enableLinkedEnvironments;
@@ -1114,11 +1158,18 @@ const writeControllerPort = Effect.gen(function* () {
  * refuses interrupts the way a dead proxy does; every provision, release and
  * interrupt is counted.
  */
-const rootFleetWorkspaces = (counts: {
-  provisions: number;
-  releases: number;
-  interrupts: number;
-}) => {
+const rootFleetWorkspaces = (
+  counts: {
+    provisions: number;
+    releases: number;
+    interrupts: number;
+  },
+  overrides: {
+    readonly manager?: Partial<Manager.CloudSandboxManager["Service"]>;
+    readonly threads?: Partial<Threads.ThreadManagementService["Service"]>;
+    readonly delegated?: () => void;
+  } = {},
+) => {
   const shell = liveThreadShell(scope.thread.threadId);
   const parent = idleThreadProjection(shell);
   const project: Project = {
@@ -1164,6 +1215,7 @@ const rootFleetWorkspaces = (counts: {
     Layer.mock(Threads.ThreadManagementService)({
       getThreadRecords: () => Effect.succeed(parent),
       getThreadShell: () => Effect.succeed(shell),
+      ...overrides.threads,
     }),
     Layer.mock(Projects.ProjectService)({ getById: () => Effect.succeedSome(project) }),
     Layer.mock(Links.PeerLinks)({
@@ -1184,10 +1236,13 @@ const rootFleetWorkspaces = (counts: {
     }),
     Layer.mock(Delegation.RemoteDelegation)({
       delegateWorkspace: () =>
-        Effect.succeed({
-          taskId: NodeId.make("task"),
-          threadId: ThreadId.make("child-thread"),
-          projectId: ProjectId.make("child-project"),
+        Effect.sync(() => {
+          overrides.delegated?.();
+          return {
+            taskId: NodeId.make("task"),
+            threadId: ThreadId.make("child-thread"),
+            projectId: ProjectId.make("child-project"),
+          };
         }),
     }),
     Layer.mock(Git.GitWorkflowService)({}),
@@ -1212,6 +1267,7 @@ const rootFleetWorkspaces = (counts: {
       ]),
     }),
     Layer.mock(Manager.CloudSandboxManager)({
+      get: () => Effect.fail(new CloudSandboxManagerError({ reason: "not-found" })),
       provision: () =>
         Effect.sync(() => {
           counts.provisions++;
@@ -1234,6 +1290,7 @@ const rootFleetWorkspaces = (counts: {
         Effect.sync(() => {
           counts.releases++;
         }),
+      ...overrides.manager,
     }),
     Layer.succeed(ProjectTransfer.CloudSandboxProjectTransfer, {
       transfer: () => Effect.succeed("/home/sandbox/.t3/cloud-workspaces/root-workspace/repo"),
@@ -1348,177 +1405,542 @@ it.effect("repoints live children's links to this server's port and skips the re
   );
 });
 
-it.effect("reports a follower's degraded state to its task and clears it on recovery", () => {
-  let listed: readonly ManagedCloudSandboxResource[] = [];
-  const dispatches: Array<{
-    readonly commandId: string;
-    readonly issue?: ManagedCloudSandboxIssue;
-  }> = [];
-  const context = Layer.mergeAll(
-    Sqlite.layerMemory,
-    ServerConfig.layerTest(process.cwd(), { prefix: "t3-sandbox-issues-" }),
-    Layer.mock(Controller.CloudSandboxController)({ available: Effect.succeed(false) }),
-    Layer.mock(Setup.ProjectSetupScriptRunner)({}),
-    Layer.mock(Threads.ThreadManagementService)({
-      getThreadRecords: () =>
-        Effect.succeed(idleThreadProjection(liveThreadShell(ThreadId.make("owner")))),
-      dispatch: (
-        command: Parameters<Threads.ThreadManagementService["Service"]["dispatch"]>[0],
-      ) => {
-        if (command.type === "delegated_task.remote.issue") {
-          dispatches.push({
-            commandId: command.commandId,
-            ...(command.issue === undefined ? {} : { issue: command.issue }),
-          });
-        }
-        return Effect.succeed({ sequence: 1, storedEvents: [] });
+it.effect.each(["local", "nested"] as const)(
+  "reports a %s follower's degraded state and clears it on recovery",
+  (route) => {
+    let unavailable = false;
+    let cardIssue: ManagedCloudSandboxIssue | undefined;
+    let listed: readonly ManagedCloudSandboxResource[] = [];
+    const dispatches: Array<{
+      readonly commandId: string;
+      readonly issue?: ManagedCloudSandboxIssue;
+    }> = [];
+    const context = Layer.mergeAll(
+      Sqlite.layerMemory,
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-sandbox-issues-" }),
+      Layer.mock(Controller.CloudSandboxController)({
+        available: Effect.succeed(route === "nested"),
+        request: () =>
+          unavailable || listed[0] === undefined
+            ? Effect.fail(
+                new WorktreeMcpFailure({
+                  code: "operation_failed",
+                  message: "Controller unavailable",
+                }),
+              )
+            : Effect.succeed({ _tag: "resource", resource: listed[0] }),
+      }),
+      Layer.mock(Setup.ProjectSetupScriptRunner)({}),
+      Layer.mock(Threads.ThreadManagementService)({
+        getThreadRecords: () =>
+          Effect.succeed({
+            ...idleThreadProjection(liveThreadShell(ThreadId.make("owner"))),
+            subagents: [remoteTaskCard(cardIssue)],
+          }),
+        dispatch: (
+          command: Parameters<Threads.ThreadManagementService["Service"]["dispatch"]>[0],
+        ) => {
+          if (command.type === "delegated_task.remote.issue") {
+            cardIssue = command.issue;
+            dispatches.push({
+              commandId: command.commandId,
+              ...(command.issue === undefined ? {} : { issue: command.issue }),
+            });
+          }
+          return Effect.succeed({ sequence: 1, storedEvents: [] });
+        },
+      }),
+      Layer.mock(Projects.ProjectService)({}),
+      Layer.mock(Links.PeerLinks)({}),
+      Layer.mock(Forwarding.PeerForwarding)({}),
+      Layer.mock(Delegation.RemoteDelegation)({}),
+      Layer.mock(Manager.CloudSandboxManager)({
+        list: Effect.sync(() => (route === "local" ? listed : [])),
+      }),
+      Layer.mock(Profiles.CloudSandboxProfiles)({ list: Effect.succeed([]) }),
+      Layer.mock(Git.GitWorkflowService)({}),
+      Layer.mock(GitDriver.GitVcsDriver)({}),
+    );
+    const issue: ManagedCloudSandboxIssue = {
+      cause: "connectivity",
+      driverKind: "boat",
+      profileId: "boat-main",
+      message: "The managed cloud connection could not be established.",
+      firstSeenAt: "2026-02-09T10:00:00Z",
+    };
+    const follower = (withIssue: boolean): ManagedCloudSandboxResource => ({
+      resourceId: ManagedCloudSandboxResourceId.make("follower-1"),
+      controllerEnvironmentId: EnvironmentId.make("source"),
+      driverKind: "boat",
+      profileId: SandboxProfileId.make("boat-main"),
+      sandboxId: "sbx-1",
+      parentResourceId: null,
+      owner: {
+        _tag: "task",
+        hostEnvironmentId: EnvironmentId.make(route === "local" ? "source" : "intermediate"),
+        sourceThreadId: ThreadId.make("owner"),
+        taskId: "task-1",
       },
-    }),
-    Layer.mock(Projects.ProjectService)({}),
-    Layer.mock(Links.PeerLinks)({}),
-    Layer.mock(Forwarding.PeerForwarding)({}),
-    Layer.mock(Delegation.RemoteDelegation)({}),
-    Layer.mock(Manager.CloudSandboxManager)({ list: Effect.sync(() => listed) }),
-    Layer.mock(Profiles.CloudSandboxProfiles)({ list: Effect.succeed([]) }),
-    Layer.mock(Git.GitWorkflowService)({}),
-    Layer.mock(GitDriver.GitVcsDriver)({}),
-  );
-  const issue: ManagedCloudSandboxIssue = {
-    cause: "connectivity",
-    driverKind: "boat",
-    profileId: "boat-main",
-    message: "The managed cloud connection could not be established.",
-    firstSeenAt: "2026-02-09T10:00:00Z",
-  };
-  const follower = (withIssue: boolean): ManagedCloudSandboxResource => ({
-    resourceId: ManagedCloudSandboxResourceId.make("follower-1"),
-    controllerEnvironmentId: EnvironmentId.make("source"),
-    driverKind: "boat",
-    profileId: SandboxProfileId.make("boat-main"),
-    sandboxId: "sbx-1",
-    parentResourceId: null,
-    owner: {
-      _tag: "task",
-      hostEnvironmentId: EnvironmentId.make("source"),
-      sourceThreadId: ThreadId.make("owner"),
-      taskId: "task-1",
-    },
-    retention: "stop-and-retain",
-    phase: "connected",
-    environmentId: null,
-    label: "follower",
-    recordingIds: [],
-    ...(withIssue ? { issue } : {}),
-  });
-  return Effect.gen(function* () {
-    const workspaces = yield* Workspaces.CloudSandboxWorkspaces;
-    listed = [follower(true)];
-    expect(yield* workspaces.reportIssues).toBe(1);
-    expect(dispatches).toHaveLength(1);
-    expect(dispatches[0]?.issue?.message).toBe(issue.message);
-    // An unchanged issue reports nothing more.
-    expect(yield* workspaces.reportIssues).toBe(1);
-    expect(dispatches).toHaveLength(1);
-    // Recovery clears the card state exactly once.
-    listed = [follower(false)];
-    expect(yield* workspaces.reportIssues).toBe(0);
-    expect(dispatches).toHaveLength(2);
-    expect(dispatches[1]?.issue).toBeUndefined();
-  }).pipe(
-    Effect.provide(
-      Workspaces.layer.pipe(
-        Layer.provideMerge(context),
-        Layer.provideMerge(randomLayer),
-        Layer.provideMerge(NodeServices.layer),
+      retention: "stop-and-retain",
+      phase: "connected",
+      environmentId: null,
+      label: "follower",
+      recordingIds: [],
+      ...(withIssue ? { issue } : {}),
+    });
+    return Effect.gen(function* () {
+      const workspaces = yield* Workspaces.CloudSandboxWorkspaces;
+      listed = [follower(true)];
+      if (route === "nested") {
+        const sql = yield* SqlClient.SqlClient;
+        const record = JSON.stringify({
+          workspaceId: "follower-1",
+          sourceThreadId: "owner",
+          requestJson: "{}",
+          phase: "running",
+          result: {
+            kind: "sandbox",
+            workspaceId: "follower-1",
+            resourceId: "follower-1",
+            environmentId: "child",
+            projectId: "child-project",
+            threadId: "child-thread",
+            taskId: "task-1",
+            workspacePath: "/repo",
+            branch: "sandbox/task",
+            note: "test",
+          },
+        });
+        yield* sql`INSERT INTO cloud_sandbox_workspaces (workspace_id,source_thread_id,payload_json) VALUES ('follower-1','owner',${record})`;
+      }
+      expect(yield* workspaces.reportIssues).toBe(1);
+      expect(dispatches).toHaveLength(1);
+      expect(dispatches[0]?.issue?.message).toBe(issue.message);
+      // An unchanged issue reports nothing more.
+      expect(yield* workspaces.reportIssues).toBe(1);
+      expect(dispatches).toHaveLength(1);
+      if (route === "nested") {
+        unavailable = true;
+        yield* workspaces.reportIssues;
+        expect(dispatches).toHaveLength(1);
+        unavailable = false;
+      }
+      // Recovery clears the card state exactly once.
+      listed = [follower(false)];
+      expect(yield* workspaces.reportIssues).toBe(0);
+      expect(dispatches).toHaveLength(2);
+      expect(dispatches[1]?.issue).toBeUndefined();
+    }).pipe(
+      Effect.provide(
+        Workspaces.layer.pipe(
+          Layer.provideMerge(context),
+          Layer.provideMerge(randomLayer),
+          Layer.provideMerge(NodeServices.layer),
+        ),
       ),
-    ),
-    Effect.scoped,
-  );
-});
+      Effect.scoped,
+    );
+  },
+);
 
-it.effect("reconciles a card this process never told: recovery clears it", () => {
-  let listed: readonly ManagedCloudSandboxResource[] = [];
-  const dispatches: Array<{
-    readonly commandId: string;
-    readonly issue?: ManagedCloudSandboxIssue;
-  }> = [];
-  const context = Layer.mergeAll(
-    Sqlite.layerMemory,
-    ServerConfig.layerTest(process.cwd(), { prefix: "t3-sandbox-issues-redrive-" }),
-    Layer.mock(Controller.CloudSandboxController)({ available: Effect.succeed(false) }),
-    Layer.mock(Setup.ProjectSetupScriptRunner)({}),
-    Layer.mock(Threads.ThreadManagementService)({
+it.effect.each(["local", "nested"] as const)(
+  "retries a %s card clear after restart without re-reporting healthy state",
+  (route) => {
+    let clearFails = true;
+    let cardIssue: ManagedCloudSandboxIssue | undefined;
+    let listed: readonly ManagedCloudSandboxResource[] = [];
+    const dispatches: Array<{
+      readonly commandId: string;
+      readonly issue?: ManagedCloudSandboxIssue;
+    }> = [];
+    const context = Layer.mergeAll(
+      Sqlite.layerMemory,
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-sandbox-issues-redrive-" }),
+      Layer.mock(Controller.CloudSandboxController)({
+        available: Effect.succeed(route === "nested"),
+        request: () =>
+          listed[0] === undefined
+            ? Effect.fail(
+                new WorktreeMcpFailure({
+                  code: "operation_failed",
+                  message: "Controller unavailable",
+                }),
+              )
+            : Effect.succeed({ _tag: "resource", resource: listed[0] }),
+      }),
+      Layer.mock(Setup.ProjectSetupScriptRunner)({}),
+      Layer.mock(Threads.ThreadManagementService)({
+        getThreadRecords: () =>
+          Effect.succeed({
+            ...idleThreadProjection(liveThreadShell(ThreadId.make("owner"))),
+            subagents: [remoteTaskCard(cardIssue)],
+          }),
+        dispatch: (
+          command: Parameters<Threads.ThreadManagementService["Service"]["dispatch"]>[0],
+        ) => {
+          if (command.type === "delegated_task.remote.issue") {
+            if (clearFails)
+              return Effect.fail(
+                new OrchestratorDispatchError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  cause: "Storage unavailable",
+                }),
+              );
+            cardIssue = command.issue;
+            dispatches.push({
+              commandId: command.commandId,
+              ...(command.issue === undefined ? {} : { issue: command.issue }),
+            });
+          }
+          return Effect.succeed({ sequence: 1, storedEvents: [] });
+        },
+      }),
+      Layer.mock(Projects.ProjectService)({}),
+      Layer.mock(Links.PeerLinks)({}),
+      Layer.mock(Forwarding.PeerForwarding)({}),
+      Layer.mock(Delegation.RemoteDelegation)({}),
+      Layer.mock(Manager.CloudSandboxManager)({
+        list: Effect.sync(() => (route === "local" ? listed : [])),
+      }),
+      Layer.mock(Profiles.CloudSandboxProfiles)({ list: Effect.succeed([]) }),
+      Layer.mock(Git.GitWorkflowService)({}),
+      Layer.mock(GitDriver.GitVcsDriver)({}),
+    );
+    const issue: ManagedCloudSandboxIssue = {
+      cause: "connectivity",
+      driverKind: "boat",
+      profileId: "boat-main",
+      message: "The managed cloud connection could not be established.",
+      firstSeenAt: "2026-02-09T10:00:00Z",
+    };
+    const follower = (): ManagedCloudSandboxResource => ({
+      resourceId: ManagedCloudSandboxResourceId.make("follower-1"),
+      controllerEnvironmentId: EnvironmentId.make("source"),
+      driverKind: "boat",
+      profileId: SandboxProfileId.make("boat-main"),
+      sandboxId: "sbx-1",
+      parentResourceId: null,
+      owner: {
+        _tag: "task",
+        hostEnvironmentId: EnvironmentId.make(route === "local" ? "source" : "intermediate"),
+        sourceThreadId: ThreadId.make("owner"),
+        taskId: "task-1",
+      },
+      retention: "stop-and-retain",
+      phase: "connected",
+      environmentId: null,
+      label: "follower",
+      recordingIds: [],
+    });
+    return Effect.gen(function* () {
+      const workspaces = yield* Workspaces.CloudSandboxWorkspaces;
+      // The follower recovered while the server was down, so this process has
+      // told nothing, yet the card still shows the recovered span.
+      listed = [follower()];
+      cardIssue = issue;
+      if (route === "nested") {
+        const sql = yield* SqlClient.SqlClient;
+        const record = JSON.stringify({
+          workspaceId: "follower-1",
+          sourceThreadId: "owner",
+          requestJson: "{}",
+          phase: "running",
+          result: {
+            kind: "sandbox",
+            workspaceId: "follower-1",
+            resourceId: "follower-1",
+            environmentId: "child",
+            projectId: "child-project",
+            threadId: "child-thread",
+            taskId: "task-1",
+            workspacePath: "/repo",
+            branch: "sandbox/task",
+            note: "test",
+          },
+        });
+        yield* sql`INSERT INTO cloud_sandbox_workspaces (workspace_id,source_thread_id,payload_json) VALUES ('follower-1','owner',${record})`;
+      }
+      expect(yield* workspaces.reportIssues).toBe(0);
+      expect(cardIssue).toEqual(issue);
+      expect(dispatches).toHaveLength(0);
+      clearFails = false;
+      expect(yield* workspaces.reportIssues).toBe(0);
+      expect(dispatches).toHaveLength(1);
+      expect(dispatches[0]?.issue).toBeUndefined();
+      // The reconciled owner reports nothing further.
+      expect(yield* workspaces.reportIssues).toBe(0);
+      expect(dispatches).toHaveLength(1);
+    }).pipe(
+      Effect.provide(
+        Workspaces.layer.pipe(
+          Layer.provideMerge(context),
+          Layer.provideMerge(randomLayer),
+          Layer.provideMerge(NodeServices.layer),
+        ),
+      ),
+      Effect.scoped,
+    );
+  },
+);
+
+const ownershipFixture = () => {
+  const counts = { provisions: 0, releases: 0, interrupts: 0, delegations: 0, bindings: 0 };
+  const state: {
+    available: boolean;
+    failClear: boolean;
+    beforeBind: Effect.Effect<void>;
+    resource: ManagedCloudSandboxResource;
+    issue: ManagedCloudSandboxIssue | undefined;
+  } = {
+    available: false,
+    failClear: false,
+    beforeBind: Effect.void,
+    resource: {
+      resourceId: ManagedCloudSandboxResourceId.make("root-workspace"),
+      controllerEnvironmentId: scope.environmentId,
+      driverKind: "boat",
+      profileId: SandboxProfileId.make("boat"),
+      sandboxId: "sandbox",
+      parentResourceId: null,
+      owner: { _tag: "user" },
+      retention: "manual",
+      phase: "connected",
+      environmentId: EnvironmentId.make("child"),
+      label: "Child",
+      recordingIds: [],
+    },
+    issue: undefined,
+  };
+  const layer = rootFleetWorkspaces(counts, {
+    manager: {
+      list: Effect.sync(() => [state.resource]),
+      get: () => Effect.sync(() => state.resource),
+      bindOwner: (_id, owner, retention) =>
+        Effect.gen(function* () {
+          counts.bindings++;
+          if (!state.available) return yield* new CloudSandboxManagerError({ reason: "transport" });
+          yield* state.beforeBind;
+          const current = state.resource.owner;
+          if (
+            current._tag !== "user" &&
+            (current._tag !== "task" || owner._tag !== "task" || current.taskId !== owner.taskId)
+          )
+            return yield* new CloudSandboxManagerError({ reason: "ownership" });
+          state.resource = {
+            ...state.resource,
+            owner: { ...owner, hostEnvironmentId: scope.environmentId },
+            retention: retention ?? "stop-and-retain",
+          };
+          return state.resource;
+        }),
+    },
+    threads: {
       getThreadRecords: () =>
         Effect.succeed({
-          ...idleThreadProjection(liveThreadShell(ThreadId.make("owner"))),
-          subagents: [remoteTaskCard(issue)],
+          ...idleThreadProjection(liveThreadShell(scope.thread.threadId)),
+          subagents: [{ ...remoteTaskCard(state.issue), id: NodeId.make("task") }],
         }),
-      dispatch: (
-        command: Parameters<Threads.ThreadManagementService["Service"]["dispatch"]>[0],
-      ) => {
-        if (command.type === "delegated_task.remote.issue") {
-          dispatches.push({
-            commandId: command.commandId,
-            ...(command.issue === undefined ? {} : { issue: command.issue }),
-          });
-        }
-        return Effect.succeed({ sequence: 1, storedEvents: [] });
-      },
-    }),
-    Layer.mock(Projects.ProjectService)({}),
-    Layer.mock(Links.PeerLinks)({}),
-    Layer.mock(Forwarding.PeerForwarding)({}),
-    Layer.mock(Delegation.RemoteDelegation)({}),
-    Layer.mock(Manager.CloudSandboxManager)({ list: Effect.sync(() => listed) }),
-    Layer.mock(Profiles.CloudSandboxProfiles)({ list: Effect.succeed([]) }),
-    Layer.mock(Git.GitWorkflowService)({}),
-    Layer.mock(GitDriver.GitVcsDriver)({}),
-  );
-  const issue: ManagedCloudSandboxIssue = {
-    cause: "connectivity",
-    driverKind: "boat",
-    profileId: "boat-main",
-    message: "The managed cloud connection could not be established.",
-    firstSeenAt: "2026-02-09T10:00:00Z",
-  };
-  const follower = (): ManagedCloudSandboxResource => ({
-    resourceId: ManagedCloudSandboxResourceId.make("follower-1"),
-    controllerEnvironmentId: EnvironmentId.make("source"),
-    driverKind: "boat",
-    profileId: SandboxProfileId.make("boat-main"),
-    sandboxId: "sbx-1",
-    parentResourceId: null,
-    owner: {
-      _tag: "task",
-      hostEnvironmentId: EnvironmentId.make("source"),
-      sourceThreadId: ThreadId.make("owner"),
-      taskId: "task-1",
+      dispatch: (command) =>
+        Effect.gen(function* () {
+          if (command.type === "delegated_task.remote.issue") {
+            if (state.failClear && command.issue === undefined)
+              return yield* Effect.die("Task issue projection is unavailable.");
+            state.issue = command.issue;
+          }
+          return { sequence: 1, storedEvents: [] };
+        }),
     },
-    retention: "stop-and-retain",
-    phase: "connected",
-    environmentId: null,
-    label: "follower",
-    recordingIds: [],
-  });
-  return Effect.gen(function* () {
-    const workspaces = yield* Workspaces.CloudSandboxWorkspaces;
-    // The follower recovered while the server was down, so this process has
-    // told nothing, yet the card still shows the recovered span.
-    listed = [follower()];
-    expect(yield* workspaces.reportIssues).toBe(0);
-    expect(dispatches).toHaveLength(1);
-    expect(dispatches[0]?.issue).toBeUndefined();
-    // The reconciled owner reports nothing further.
-    expect(yield* workspaces.reportIssues).toBe(0);
-    expect(dispatches).toHaveLength(1);
+    delegated: () => {
+      counts.delegations++;
+    },
   }).pipe(
-    Effect.provide(
-      Workspaces.layer.pipe(
-        Layer.provideMerge(context),
-        Layer.provideMerge(randomLayer),
-        Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-ownership-recovery-" }).pipe(
+        Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
       ),
     ),
-    Effect.scoped,
   );
+  return { counts, state, layer };
+};
+
+it.effect.each(["request", "restart"] as const)(
+  "recovers a pending ownership bind on %s without creating another child",
+  (recovery) => {
+    const fixture = ownershipFixture();
+    return Effect.gen(function* () {
+      yield* writeControllerPort;
+      const workspaces = yield* Workspaces.CloudSandboxWorkspaces;
+      const input = { ...rootInput, deleteOnCompletion: true };
+      const first = yield* workspaces.delegateSandboxTask(scope, input);
+      const sql = yield* SqlClient.SqlClient;
+      const pending = yield* sql<{
+        payload_json: string;
+      }>`SELECT payload_json FROM cloud_sandbox_workspaces`;
+      expect(JSON.parse(pending[0]!.payload_json)).toMatchObject({
+        phase: "running",
+        result: { taskId: first.taskId },
+        binding: { _tag: "pending", retention: "delete-on-completion" },
+      });
+      expect(fixture.state.issue?.cause).toBe("bind");
+      expect(fixture.counts.bindings).toBe(1);
+      fixture.state.available = true;
+      if (recovery === "request") {
+        expect(yield* workspaces.delegateSandboxTask(scope, input)).toEqual(first);
+      } else {
+        const restarted = yield* Workspaces.make;
+        expect(yield* restarted.recoverOwnership).toBe(1);
+      }
+      expect(fixture.state.resource.owner).toMatchObject({ _tag: "task", taskId: first.taskId });
+      expect(fixture.state.resource.retention).toBe("delete-on-completion");
+      expect(fixture.state.issue).toBeUndefined();
+      expect(fixture.counts.provisions).toBe(1);
+      expect(fixture.counts.delegations).toBe(1);
+      const bound = yield* sql<{
+        payload_json: string;
+      }>`SELECT payload_json FROM cloud_sandbox_workspaces`;
+      expect(JSON.parse(bound[0]!.payload_json).binding._tag).toBe("bound");
+    }).pipe(Effect.provide(fixture.layer), Effect.scoped);
+  },
+);
+
+it.effect.each(["user", "bound", "foreign", "deleted"] as const)(
+  "repairs a legacy %s resource conservatively",
+  (kind) => {
+    const fixture = ownershipFixture();
+    return Effect.gen(function* () {
+      yield* writeControllerPort;
+      const workspaces = yield* Workspaces.CloudSandboxWorkspaces;
+      yield* workspaces.delegateSandboxTask(scope, rootInput);
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`UPDATE cloud_sandbox_workspaces SET payload_json = json_remove(payload_json, '$.binding')`;
+      fixture.state.available = true;
+      if (kind === "bound" || kind === "foreign")
+        fixture.state.resource = {
+          ...fixture.state.resource,
+          owner: {
+            _tag: "task",
+            hostEnvironmentId: scope.environmentId,
+            sourceThreadId: scope.thread.threadId,
+            taskId: kind === "bound" ? "task" : "another-task",
+          },
+          retention: "delete-on-completion",
+        };
+      if (kind === "deleted")
+        fixture.state.resource = { ...fixture.state.resource, phase: "deleted" };
+      const before = fixture.counts.bindings;
+      yield* workspaces.recoverOwnership;
+      if (kind === "user") {
+        expect(fixture.state.resource.owner).toMatchObject({ _tag: "task", taskId: "task" });
+        expect(fixture.state.resource.retention).toBe("stop-and-retain");
+      } else if (kind === "bound") {
+        expect(fixture.state.resource.retention).toBe("delete-on-completion");
+      } else if (kind === "foreign") {
+        expect(fixture.state.resource.owner).toMatchObject({ taskId: "another-task" });
+        expect(fixture.state.issue?.cause).toBe("bind");
+      } else {
+        expect(fixture.counts.bindings).toBe(before);
+      }
+      expect(fixture.counts.provisions).toBe(1);
+      expect(fixture.counts.delegations).toBe(1);
+    }).pipe(Effect.provide(fixture.layer), Effect.scoped);
+  },
+);
+
+it.effect("retries a durable issue clear after binding without binding again", () => {
+  const fixture = ownershipFixture();
+  return Effect.gen(function* () {
+    yield* writeControllerPort;
+    const workspaces = yield* Workspaces.CloudSandboxWorkspaces;
+    yield* workspaces.delegateSandboxTask(scope, rootInput);
+    fixture.state.available = true;
+    fixture.state.failClear = true;
+    expect(yield* workspaces.recoverOwnership).toBe(0);
+    const sql = yield* SqlClient.SqlClient;
+    const rows = yield* sql<{
+      payload_json: string;
+    }>`SELECT payload_json FROM cloud_sandbox_workspaces`;
+    expect(JSON.parse(rows[0]!.payload_json).binding._tag).toBe("clearing");
+    expect(fixture.state.issue?.cause).toBe("bind");
+    const bindings = fixture.counts.bindings;
+    fixture.state.failClear = false;
+    const restarted = yield* Workspaces.make;
+    expect(yield* restarted.recoverOwnership).toBe(1);
+    expect(fixture.state.issue).toBeUndefined();
+    expect(fixture.counts.bindings).toBe(bindings);
+  }).pipe(Effect.provide(fixture.layer), Effect.scoped);
+});
+
+it.effect("does not recover ownership after workspace deletion", () => {
+  const fixture = ownershipFixture();
+  return Effect.gen(function* () {
+    yield* writeControllerPort;
+    const workspaces = yield* Workspaces.CloudSandboxWorkspaces;
+    yield* workspaces.delegateSandboxTask(scope, rootInput);
+    const bindings = fixture.counts.bindings;
+    yield* workspaces.remove(scope, rootInput.workspaceId);
+    fixture.state.available = true;
+    expect(yield* workspaces.recoverOwnership).toBe(0);
+    const restarted = yield* Workspaces.make;
+    expect(yield* restarted.recoverOwnership).toBe(0);
+    expect(fixture.counts.bindings).toBe(bindings);
+    expect(fixture.counts.provisions).toBe(1);
+    expect(fixture.counts.releases).toBe(1);
+  }).pipe(Effect.provide(fixture.layer), Effect.scoped);
+});
+
+it.effect("serializes ownership recovery with workspace deletion", () => {
+  const fixture = ownershipFixture();
+  return Effect.gen(function* () {
+    yield* writeControllerPort;
+    const workspaces = yield* Workspaces.CloudSandboxWorkspaces;
+    yield* workspaces.delegateSandboxTask(scope, rootInput);
+    const entered = yield* Deferred.make<void>();
+    const resume = yield* Deferred.make<void>();
+    fixture.state.available = true;
+    fixture.state.beforeBind = Deferred.succeed(entered, undefined).pipe(
+      Effect.andThen(Deferred.await(resume)),
+    );
+    const recovering = yield* workspaces.recoverOwnership.pipe(
+      Effect.forkChild({ startImmediately: true }),
+    );
+    yield* Deferred.await(entered);
+    const deleting = yield* workspaces
+      .remove(scope, rootInput.workspaceId)
+      .pipe(Effect.forkChild({ startImmediately: true }));
+    yield* Deferred.succeed(resume, undefined);
+    yield* Fiber.join(recovering);
+    yield* Fiber.join(deleting);
+    const sql = yield* SqlClient.SqlClient;
+    const rows = yield* sql<{
+      payload_json: string;
+    }>`SELECT payload_json FROM cloud_sandbox_workspaces`;
+    expect(JSON.parse(rows[0]!.payload_json).phase).toBe("deleted");
+    expect(yield* workspaces.recoverOwnership).toBe(0);
+    expect(fixture.counts.releases).toBe(1);
+  }).pipe(Effect.provide(fixture.layer), Effect.scoped);
+});
+
+it.effect("keeps pending ownership visible while resource diagnostics report healthy", () => {
+  const fixture = ownershipFixture();
+  return Effect.gen(function* () {
+    yield* writeControllerPort;
+    const workspaces = yield* Workspaces.CloudSandboxWorkspaces;
+    yield* workspaces.delegateSandboxTask(scope, rootInput);
+    fixture.state.resource = {
+      ...fixture.state.resource,
+      owner: {
+        _tag: "task",
+        hostEnvironmentId: scope.environmentId,
+        sourceThreadId: scope.thread.threadId,
+        taskId: "task",
+      },
+    };
+    yield* workspaces.reportIssues;
+    expect(fixture.state.issue?.cause).toBe("bind");
+    fixture.state.available = true;
+    yield* workspaces.recoverOwnership;
+    yield* workspaces.reportIssues;
+    expect(fixture.state.issue).toBeUndefined();
+  }).pipe(Effect.provide(fixture.layer), Effect.scoped);
 });

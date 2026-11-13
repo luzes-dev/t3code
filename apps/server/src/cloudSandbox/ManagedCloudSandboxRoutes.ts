@@ -233,6 +233,8 @@ const pumpFrames =
 
 const proxy = Effect.gen(function* () {
   const request = yield* HttpServerRequest.HttpServerRequest;
+  if (request.url.split("?", 1)[0]?.includes("\\"))
+    return HttpServerResponse.empty({ status: 404 });
   const url = Option.getOrNull(requestUrl(request));
   const match = url?.pathname.match(/^\/api\/cloud-sandboxes\/managed\/([^/]+)\/proxy(\/.*)$/u);
   if (!url || !match) return HttpServerResponse.empty({ status: 404 });

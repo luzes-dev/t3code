@@ -74,8 +74,9 @@ describe("browser target resolver", () => {
     });
     const { resolveServerOwnedUrl, resolveExternalServerUrl, releaseExternalServerUrl } =
       await import("./browserTargetResolver");
+    let providerToken = "ymmc";
     const hostedFor = (serverOwned: string) =>
-      `https://d.example.com/pfx${new URL(serverOwned).pathname}${new URL(serverOwned).search}&t=ymmc`;
+      `https://d.example.com/pfx${new URL(serverOwned).pathname}${new URL(serverOwned).search}&t=${providerToken}`;
     openSandboxPreviewRun.mockImplementation((_registry, input) =>
       Promise.resolve(
         input.close === true
@@ -111,29 +112,37 @@ describe("browser target resolver", () => {
     expect(resolveServerOwnedUrl(sandboxEnvironment, hosted)).toBe("http://localhost:3000/app?x=1");
 
     // Re-resolving an alias re-mints a fresh hosted URL from the server form.
-    await expect(resolveExternalServerUrl(sandboxEnvironment, `${hosted}&z=2`)).resolves.toBe(
-      "https://d.example.com/pfx/app?x=1&z=2&t=ymmc",
+    providerToken = "next";
+    const reminted = await resolveExternalServerUrl(sandboxEnvironment, `${hosted}&z=2`);
+    expect(reminted).toBe("https://d.example.com/pfx/app?x=1&z=2&t=next");
+    expect(resolveServerOwnedUrl(sandboxEnvironment, reminted)).toBe(
+      "http://localhost:3000/app?x=1&z=2",
     );
+    expect(resolveServerOwnedUrl(sandboxEnvironment, hosted)).toBe("http://localhost:3000/app?x=1");
     expect(openSandboxPreviewRun).toHaveBeenLastCalledWith(
       expect.anything(),
       expect.objectContaining({ url: "http://localhost:3000/app?x=1&z=2" }),
     );
 
-    // Releasing an alias closes its hosting session.
+    // Releasing an alias forgets its provider URL without claiming to revoke its token.
     await releaseExternalServerUrl(
       sandboxEnvironment,
-      "https://d.example.com/pfx/app?x=1&z=2&t=ymmc",
+      "https://d.example.com/pfx/app/navigated?x=1&z=2&t=next",
     );
     expect(openSandboxPreviewRun).toHaveBeenLastCalledWith(
       expect.anything(),
       expect.objectContaining({ close: true }),
     );
 
+    expect(resolveServerOwnedUrl(sandboxEnvironment, hosted)).toBe("http://localhost:3000/app?x=1");
+    await releaseExternalServerUrl(sandboxEnvironment, hosted);
+    expect(resolveServerOwnedUrl(sandboxEnvironment, hosted)).toBe(hosted);
+
     // Sandbox URLs that are not loopback services load directly.
     await expect(
       resolveExternalServerUrl(sandboxEnvironment, "https://plain.example.com/site"),
     ).resolves.toBe("https://plain.example.com/site");
-    expect(openSandboxPreviewRun).toHaveBeenCalledTimes(3);
+    expect(openSandboxPreviewRun).toHaveBeenCalledTimes(4);
   });
 
   it("forgets a forwarded loopback alias once its close has been sent", async () => {
@@ -162,6 +171,11 @@ describe("browser target resolver", () => {
     expect(forwarded).toBe("http://127.0.0.1:47123/app");
     expect(resolveServerOwnedUrl(sandboxEnvironment, forwarded)).toBe("http://localhost:3000/app");
 
+    expect(await resolveExternalServerUrl(sandboxEnvironment, "http://localhost:3000/app")).toBe(
+      forwarded,
+    );
+    await releaseExternalServerUrl(sandboxEnvironment, forwarded);
+    expect(resolveServerOwnedUrl(sandboxEnvironment, forwarded)).toBe("http://localhost:3000/app");
     await releaseExternalServerUrl(sandboxEnvironment, forwarded);
     expect(openSandboxPreviewRun).toHaveBeenLastCalledWith(
       expect.anything(),

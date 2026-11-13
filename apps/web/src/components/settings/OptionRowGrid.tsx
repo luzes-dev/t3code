@@ -38,7 +38,7 @@ export function OptionRowGrid({
       disabled={disabled}
       value={value}
       onValueChange={onValueChange}
-      className="grid grid-cols-1 sm:grid-cols-2"
+      className={items.length > 1 ? "grid grid-cols-1 sm:grid-cols-2" : "grid grid-cols-1"}
     >
       {items.map((item) => (
         <RadioPrimitive.Root

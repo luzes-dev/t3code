@@ -209,7 +209,7 @@ describe("AddEnvironmentDialog", () => {
     await expect
       .element(page.getByRole("radio", { name: "Standard" }))
       .toHaveAttribute("aria-checked", "true");
-    await userEvent.click(page.getByRole("dialog").getByRole("button", { name: "Finish" }));
+    await userEvent.click(page.getByRole("dialog").getByRole("button", { name: "Save profile" }));
     expect(mocks.saveSandboxProfile).toHaveBeenCalledOnce();
     expect(mocks.saveSandboxProfile).toHaveBeenLastCalledWith({
       environmentId: "environment-primary-1",
@@ -240,11 +240,11 @@ describe("AddEnvironmentDialog", () => {
     await userEvent.click(page.getByRole("button", { name: "Next" }));
     await userEvent.type(page.getByPlaceholder("boat_k3Xz9f…"), "boat_bad_key");
     await userEvent.click(page.getByRole("button", { name: "Next" }));
-    await expect.element(page.getByText("Invalid Boat API key.")).toBeInTheDocument();
+    await expect.element(page.getByText(/^Invalid Boat API key\./)).toBeInTheDocument();
 
     await userEvent.click(page.getByRole("button", { name: "Back" }));
     await expect.element(sandboxCard()).toBeInTheDocument();
-    await expect.element(page.getByText("Invalid Boat API key.")).not.toBeInTheDocument();
+    await expect.element(page.getByText(/^Invalid Boat API key\./)).not.toBeInTheDocument();
   });
 
   it("reuses a stored key and its saved defaults without re-saving the key", async () => {
@@ -309,7 +309,7 @@ describe("AddEnvironmentDialog", () => {
       }),
     );
 
-    await userEvent.click(page.getByRole("dialog").getByRole("button", { name: "Finish" }));
+    await userEvent.click(page.getByRole("dialog").getByRole("button", { name: "Save profile" }));
     expect(mocks.saveSandboxProfile).toHaveBeenCalledTimes(1);
     expect(mocks.saveSandboxProfile).toHaveBeenCalledWith({
       environmentId: "environment-primary-1",
@@ -353,7 +353,7 @@ describe("AddEnvironmentDialog", () => {
     await userEvent.clear(page.getByLabelText("Concurrent sandboxes"));
     await userEvent.type(page.getByLabelText("Concurrent sandboxes"), "5");
     await userEvent.type(page.getByLabelText("Template snapshot"), "project-template");
-    await userEvent.click(page.getByRole("dialog").getByRole("button", { name: "Finish" }));
+    await userEvent.click(page.getByRole("dialog").getByRole("button", { name: "Save profile" }));
 
     expect(mocks.saveSandboxProfile).toHaveBeenCalledOnce();
     expect(mocks.saveSandboxProfile).toHaveBeenLastCalledWith({
@@ -378,7 +378,7 @@ describe("AddEnvironmentDialog", () => {
 
     await reachSandboxDefaults();
     await userEvent.type(page.getByLabelText("Monthly budget"), "abc");
-    await userEvent.click(page.getByRole("dialog").getByRole("button", { name: "Finish" }));
+    await userEvent.click(page.getByRole("dialog").getByRole("button", { name: "Save profile" }));
 
     await expect
       .element(

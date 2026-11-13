@@ -86,8 +86,8 @@ export function countRunningCloudSandboxes(
 /**
  * Owner-derived selectability: a user-owned resource is an environment the
  * user picked, while thread and task owned followers are the private compute
- * of their controller host's delegated work, so pickers and selectable
- * counts skip them; controller administration views keep them listed.
+ * of their controller host's delegated work. This view keeps followers out
+ * without removing them from controller administration.
  */
 export function isSelectableEnvironment(resource: ManagedCloudSandboxResource): boolean {
   return resource.owner._tag === "user";
@@ -127,6 +127,19 @@ const MANAGED_SANDBOX_ISSUE_CAUSE_LABELS: Record<ManagedCloudSandboxIssue["cause
 /** One line a task card or admin row shows for a degraded follower sandbox. */
 export function describeManagedCloudSandboxIssue(issue: ManagedCloudSandboxIssue): string {
   return `${MANAGED_SANDBOX_ISSUE_CAUSE_LABELS[issue.cause]}: ${issue.message}`;
+}
+
+export function managedSandboxIssueRecovery(cause: ManagedCloudSandboxIssue["cause"]): string {
+  switch (cause) {
+    case "provider-auth":
+      return "Edit this cloud profile below to replace its API key.";
+    case "connectivity":
+      return "Check the sandbox's network and SSH access. The controller retries automatically.";
+    case "bind":
+      return "The controller could not bind this sandbox to its task. Check the owning task before deleting it.";
+    case "allocation":
+      return "Check this cloud profile's budget, capacity and provider availability before retrying.";
+  }
 }
 
 /** The cause a warning collapses on: one dead profile token is one warning. */
@@ -251,8 +264,7 @@ export function createManagedSandboxAtoms<R, E>(
       )
       .pipe(Atom.setIdleTTL(0)),
   );
-  // Pickers and selectable environment counts read this view; the full list
-  // stays available for controller administration surfaces.
+  // This owner-derived view is separate from the controller administration list.
   const selectable = Atom.family((controllerEnvironmentId: EnvironmentId) =>
     Atom.map(list(controllerEnvironmentId), (result) =>
       AsyncResult.map(result, (resources) => resources.filter(isSelectableEnvironment)),

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import { createBoatApiClient } from "./client.ts";
 
@@ -68,6 +69,49 @@ describe("BoatApiClient", () => {
       expect(requests.every((request) => request.authorization === "Bearer boat_test")).toBe(true);
     }),
   );
+  it.effect("rejects repeated pagination cursors without looping", () =>
+    Effect.gen(function* () {
+      const { client, requests } = setup([
+        { body: { ok: true, sandboxes: [], nextCursor: "next" } },
+        { body: { ok: true, sandboxes: [], nextCursor: "next" } },
+      ]);
+      const result = yield* client.listSandboxes().pipe(Effect.result);
+      expect(result).toMatchObject({ _tag: "Failure", failure: { status: 502 } });
+      expect(requests).toHaveLength(2);
+    }),
+  );
+
+  it.effect.each(["headers", "body", "artifact"] as const)(
+    "bounds a stalled %s request with a typed timeout",
+    (stage) =>
+      Effect.gen(function* () {
+        const httpClient = HttpClient.make((request) =>
+          stage === "headers"
+            ? Effect.never
+            : Effect.succeed(
+                HttpClientResponse.fromWeb(request, new Response(new ReadableStream())),
+              ),
+        );
+        const client = createBoatApiClient({ apiKey: "boat_private_test", httpClient });
+        const request =
+          stage === "artifact"
+            ? client.getArtifact(sandbox.id, "/recording.mp4").pipe(Effect.asVoid)
+            : client.getSandbox(sandbox.id).pipe(Effect.asVoid);
+        const running = yield* request.pipe(
+          Effect.result,
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        yield* TestClock.adjust(stage === "artifact" ? "5 minutes" : "90 seconds");
+        expect(running.pollUnsafe()).toMatchObject({
+          _tag: "Success",
+          value: {
+            _tag: "Failure",
+            failure: { status: 408, reason: "Boat API request timed out." },
+          },
+        });
+      }),
+  );
+
   it.effect("rejects malformed list responses rather than verifying credentials", () =>
     Effect.gen(function* () {
       for (const body of [

@@ -230,9 +230,17 @@ export const makeConnections = (rt: ManagerRuntime) => {
     };
     yield* store.save(record);
     // Connected again: the record's issue was presence, and recovery erases it.
-    if (record.issue !== undefined) yield* store.save(withoutIssue(record));
+    if (record.issue !== undefined) {
+      record = withoutIssue(record);
+      yield* store.save(record);
+    }
     if (record.snapshotName !== null && driver.snapshots) {
-      yield* driver.snapshots.delete(record.snapshotName);
+      yield* driver.snapshots.delete(record.snapshotName).pipe(
+        Effect.catchTags({
+          CloudSandboxError: (error) =>
+            error.reason === "not-found" ? Effect.void : Effect.fail(error),
+        }),
+      );
       record = { ...record, snapshotName: null };
       yield* store.save(record);
     }
@@ -284,7 +292,7 @@ export const makeConnections = (rt: ManagerRuntime) => {
             return;
           }
           // A working sandbox keeps its state, and reconcile retries its connect.
-          if (initial.environmentId === null) {
+          if (current.environmentId === null) {
             const driver = yield* driverFor(current);
             const stopped = yield* driver.stop(current.sandboxId).pipe(Effect.option);
             yield* store.save({

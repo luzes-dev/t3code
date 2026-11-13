@@ -1,7 +1,6 @@
 import * as ServerConfig from "../config.ts";
 import {
   CommandId,
-  EnvironmentId,
   ManagedCloudSandboxIssue,
   ManagedCloudSandboxResourceId,
   MANAGED_CLOUD_SOURCE_PORT,
@@ -14,21 +13,17 @@ import {
   type ModelSelection,
   type RuntimeMode,
   type ProviderInteractionMode,
-  managedCloudSandboxProxyPath,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as SecureRandom from "effect/crypto/SecureRandom";
-import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
-import type { ManagedSandboxFollowerOwner, ManagedSandboxRetention } from "@t3tools/contracts";
 import type { McpThreadInvocationScope } from "../mcp/McpInvocationContext.ts";
 import { ProjectToolkit } from "../mcp/toolkits/project/tools.ts";
 import * as Threads from "../orchestration-v2/ThreadManagementService.ts";
@@ -44,23 +39,14 @@ import * as Controller from "./CloudSandboxController.ts";
 import * as Manager from "../cloudSandbox/CloudSandboxManager.ts";
 import type { ManagedCloudSandboxConnection, SandboxProfileId } from "@t3tools/contracts";
 import * as Profiles from "../cloudSandbox/CloudSandboxProfiles.ts";
-import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import * as ProjectTransfer from "./CloudSandboxProjectTransfer.ts";
+import * as WorkspaceLifecycle from "./CloudSandboxWorkspaceLifecycle.ts";
+import type { AcquiredWorkspace } from "./CloudSandboxWorkspaceLifecycle.ts";
 
-const Record = Schema.Struct({
-  workspaceId: ManagedCloudSandboxResourceId,
-  sourceThreadId: ThreadId,
-  requestJson: Schema.String,
-  phase: Schema.Literals(["creating", "running", "deleting", "resource-deleted", "deleted"]),
-  childEnvironmentId: Schema.optionalKey(EnvironmentId),
-  result: Schema.NullOr(SandboxWorktreeHandoffResult),
-});
 const SetupStatus = Schema.Literals(["started", "completed"]);
 const decodeSetupStatus = Schema.decodeUnknownEffect(SetupStatus);
 const decodeResourceId = Schema.decodeEffect(ManagedCloudSandboxResourceId);
 const isWorktreeFailure = Schema.is(WorktreeMcpFailure);
-const decode = Schema.decodeUnknownEffect(Schema.fromJsonString(Record));
-const encode = Schema.encodeEffect(Schema.fromJsonString(Record));
 const encodeRequest = Schema.encodeEffect(Schema.fromJsonString(WorktreeMcpHandoffInput));
 const failure = (message: string) => new WorktreeMcpFailure({ code: "operation_failed", message });
 const invalid = (message: string) => new WorktreeMcpFailure({ code: "invalid_request", message });
@@ -70,14 +56,6 @@ const workspaceScope = (scope: McpThreadInvocationScope, workspaceId: string) =>
     ...scope,
     requestNamespace: `cloud-workspace:${workspaceId}`,
   }) satisfies McpThreadInvocationScope;
-
-interface AcquiredWorkspace {
-  readonly connection: ManagedCloudSandboxConnection;
-  readonly pairingToken: string;
-  readonly linkUrl: string;
-  /** Copies the source checkout in; resolves to the checkout path inside the sandbox. */
-  readonly prepareCheckout?: Effect.Effect<string, WorktreeMcpFailure>;
-}
 
 export class CloudSandboxWorkspaces extends Context.Service<
   CloudSandboxWorkspaces,
@@ -136,6 +114,7 @@ export class CloudSandboxWorkspaces extends Context.Service<
      * source thread lives.
      */
     readonly sweep: Effect.Effect<number, WorktreeMcpFailure>;
+    readonly recoverOwnership: Effect.Effect<number, WorktreeMcpFailure>;
     /**
      * Points each managed child's peer link at this server's current port.
      * Does nothing where the controller reaches children directly.
@@ -155,7 +134,6 @@ export class CloudSandboxWorkspaces extends Context.Service<
 
 export const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
-  const fs = yield* FileSystem.FileSystem;
   const sql = yield* SqlClient.SqlClient;
   const random = yield* SecureRandom.SecureRandom;
   const git = yield* Git.GitWorkflowService;
@@ -171,29 +149,6 @@ export const make = Effect.gen(function* () {
   const profiles = yield* Profiles.CloudSandboxProfiles;
   const transfer = yield* ProjectTransfer.CloudSandboxProjectTransfer;
   const lock = yield* KeyedLock.make<string>();
-  const localServerPort = readPersistedServerRuntimeState(config.serverRuntimeStatePath).pipe(
-    Effect.provideService(FileSystem.FileSystem, fs),
-    Effect.orElseSucceed(() => Option.none()),
-    Effect.map((state) => (Option.isSome(state) ? state.value.port : config.port)),
-  );
-  const load = Effect.fn("CloudSandboxWorkspaces.load")(
-    function* (workspaceId: ManagedCloudSandboxResourceId) {
-      const rows = yield* sql<{
-        readonly payload_json: string;
-      }>`SELECT payload_json FROM cloud_sandbox_workspaces WHERE workspace_id = ${workspaceId}`;
-      return rows[0] ? yield* decode(rows[0].payload_json).pipe(Effect.asSome) : Option.none();
-    },
-    Effect.mapError(() => failure("Unable to read the cloud workspace journal.")),
-  );
-  const save = Effect.fn("CloudSandboxWorkspaces.save")(
-    function* (record: typeof Record.Type) {
-      const json = yield* encode(record);
-      yield* sql`INSERT INTO cloud_sandbox_workspaces (workspace_id, source_thread_id, payload_json)
-      VALUES (${record.workspaceId}, ${record.sourceThreadId}, ${json})
-      ON CONFLICT(workspace_id) DO UPDATE SET payload_json = excluded.payload_json`;
-    },
-    Effect.mapError(() => failure("Unable to persist the cloud workspace journal.")),
-  );
   const loadSetupStatus = Effect.fn("CloudSandboxWorkspaces.loadSetupStatus")(
     function* (threadId: ThreadId) {
       const rows = yield* sql<{
@@ -327,7 +282,7 @@ export const make = Effect.gen(function* () {
         },
         enableLinkedEnvironments: true,
       });
-      const controllerPort = yield* localServerPort;
+      const controllerPort = yield* lifecycle.localServerPort;
       if (controllerPort <= 0) return yield* failure("Unable to determine the local server port.");
       return { route, base: `http://127.0.0.1:${controllerPort}` };
     },
@@ -341,6 +296,25 @@ export const make = Effect.gen(function* () {
     ),
   );
   /** A disk fork of the sandbox this controller runs in; the fork is the child's own sandbox. */
+  const prepareWorkspace = Effect.fn("CloudSandboxWorkspaces.prepareWorkspace")(function* (
+    scope: McpThreadInvocationScope,
+    branch: string,
+    acquired: AcquiredWorkspace,
+  ) {
+    const workspacePath =
+      acquired.prepareCheckout === undefined ? undefined : yield* acquired.prepareCheckout;
+    const parent = yield* threads
+      .getThreadRecords(scope.thread.threadId, [])
+      .pipe(Effect.mapError(() => failure("Unable to read the source thread.")));
+    return yield* attachProject(scope, {
+      connection: acquired.connection,
+      pairingToken: acquired.pairingToken,
+      linkUrl: acquired.linkUrl,
+      sourceProjectId: parent.thread.projectId,
+      branch,
+      ...(workspacePath === undefined ? {} : { workspacePath }),
+    });
+  });
   const forkFromController = Effect.fn("CloudSandboxWorkspaces.forkFromController")(function* (
     workspaceId: ManagedCloudSandboxResourceId,
     branch: string,
@@ -362,295 +336,6 @@ export const make = Effect.gen(function* () {
       pairingToken: fork.pairingToken,
       linkUrl: fork.connection.routePrefix,
     } satisfies AcquiredWorkspace;
-  });
-  const releaseResource = Effect.fn("CloudSandboxWorkspaces.releaseResource")(function* (
-    resourceId: ManagedCloudSandboxResourceId,
-  ) {
-    if (yield* controller.available) yield* controller.request({ _tag: "delete", resourceId });
-    else
-      yield* manager
-        .release(resourceId)
-        .pipe(Effect.mapError(() => failure("Unable to delete the sandbox workspace.")));
-  });
-  /** Records the owner of a delegated workspace's resource; the controller
-   * derives the host id, so in-sandbox and root paths validate identically. */
-  const bindResourceOwner = Effect.fn("CloudSandboxWorkspaces.bindResourceOwner")(function* (
-    resourceId: ManagedCloudSandboxResourceId,
-    owner: ManagedSandboxFollowerOwner,
-    retention?: ManagedSandboxRetention | undefined,
-  ) {
-    if (yield* controller.available)
-      return yield* controller.request({
-        _tag: "bindOwner",
-        resourceId,
-        owner,
-        ...(retention === undefined ? {} : { retention }),
-      });
-    yield* manager
-      .bindOwner(resourceId, owner, retention)
-      .pipe(Effect.mapError(() => failure("Unable to bind the sandbox owner.")));
-  });
-  const inspectResource = Effect.fn("CloudSandboxWorkspaces.inspectResource")(function* (
-    resourceId: ManagedCloudSandboxResourceId,
-  ) {
-    if (!(yield* controller.available)) return yield* manager.get(resourceId);
-    const result = yield* controller.request({ _tag: "get", resourceId });
-    if (result._tag !== "resource")
-      return yield* failure("Unable to inspect the sandbox resource.");
-    return result.resource;
-  });
-  const inspectPowerState = Effect.fn("CloudSandboxWorkspaces.inspectPowerState")(function* (
-    resourceId: ManagedCloudSandboxResourceId,
-  ) {
-    if (!(yield* controller.available)) return yield* manager.execute(resourceId, { _tag: "get" });
-    const result = yield* controller.request({ _tag: "status", resourceId });
-    if (result._tag !== "result")
-      return yield* failure("Unable to inspect the sandbox power state.");
-    return result.result;
-  });
-  const doneStatuses = new Set(["completed", "failed", "cancelled", "interrupted"]);
-  /**
-   * Latest known delegated-task status from the parent thread's stored events.
-   * Unreadable events mean unknown, and an unknown task is never "settled".
-   */
-  const delegatedSettled = Effect.fn("CloudSandboxWorkspaces.delegatedSettled")(function* (
-    sourceThreadId: ThreadId,
-    taskId: string,
-  ) {
-    const last = yield* threads
-      .streamStoredEventsFrom({
-        threadId: sourceThreadId,
-        afterSequence: 0,
-        eventType: "subagent.updated",
-      })
-      .pipe(
-        Stream.filter(
-          (stored) =>
-            stored.event.type === "subagent.updated" && stored.event.payload.id === taskId,
-        ),
-        Stream.map((stored) =>
-          stored.event.type === "subagent.updated" ? stored.event.payload.status : null,
-        ),
-        Stream.runLast,
-        Effect.catch(() => Effect.succeedNone),
-      );
-    return Option.isSome(last) && last.value !== null && doneStatuses.has(last.value);
-  });
-  /**
-   * Deletes sandbox workspaces whose VM has already stopped and that are
-   * orphaned: their source thread is gone, or they never finished creating.
-   * A follower bound to delete-on-completion also goes once its task settled.
-   * Active children and live VMs are never touched.
-   */
-  const sweepOnce = Effect.fn("CloudSandboxWorkspaces.sweep")(function* () {
-    const rows = yield* sql<{
-      readonly workspace_id: string;
-      readonly payload_json: string;
-    }>`SELECT workspace_id, payload_json FROM cloud_sandbox_workspaces`.pipe(
-      Effect.mapError(() => failure("Unable to read the cloud workspace journal.")),
-    );
-    let reclaimed = 0;
-    for (const row of rows) {
-      const didReclaim = yield* Effect.gen(function* () {
-        const record = yield* decode(row.payload_json).pipe(Effect.option);
-        if (Option.isNone(record) || record.value.phase === "deleted") return false;
-        const shell = yield* threads
-          .getThreadShell(record.value.sourceThreadId)
-          .pipe(Effect.mapError(() => failure("Unable to inspect the source thread.")));
-        const orphaned = shell === null || shell.deletedAt !== null;
-        const childEnvironmentId =
-          record.value.childEnvironmentId ?? record.value.result?.environmentId ?? null;
-        const resourceId = record.value.workspaceId;
-        const resource = yield* inspectResource(resourceId).pipe(Effect.option);
-        if (Option.isNone(resource)) return false;
-        if (resource.value.phase !== "deleted") {
-          const settlesIt =
-            resource.value.retention === "delete-on-completion" &&
-            record.value.phase === "running" &&
-            record.value.result !== null &&
-            (yield* delegatedSettled(record.value.sourceThreadId, record.value.result.taskId));
-          if (!settlesIt && !orphaned && record.value.phase !== "creating") return false;
-          const status = yield* inspectPowerState(resourceId).pipe(Effect.option);
-          if (
-            Option.isNone(status) ||
-            status.value._tag !== "status" ||
-            status.value.sandbox.state !== "stopped"
-          ) {
-            return false;
-          }
-          const deleted = yield* releaseResource(resourceId).pipe(Effect.result);
-          if (deleted._tag === "Failure") return false;
-        }
-        if (childEnvironmentId !== null) {
-          yield* links
-            .unlink(childEnvironmentId)
-            .pipe(Effect.mapError(() => failure("Unable to unlink the deleted workspace.")));
-        }
-        yield* save({ ...record.value, phase: "deleted" });
-        return true;
-      }).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("Failed to reclaim cloud workspace; continuing sweep.", {
-            workspaceId: row.workspace_id,
-            cause,
-          }).pipe(Effect.as(false)),
-        ),
-      );
-      if (didReclaim) reclaimed++;
-    }
-    return reclaimed;
-  });
-  /**
-   * A managed child reaches this server through the port its runtime state
-   * file last recorded, which changes across restarts.
-   */
-  const repointLinks = Effect.fn("CloudSandboxWorkspaces.repointLinks")(function* () {
-    if (yield* controller.available) return 0;
-    const port = yield* localServerPort;
-    if (port <= 0) return 0;
-    const rows = yield* sql<{
-      readonly workspace_id: string;
-      readonly payload_json: string;
-    }>`SELECT workspace_id, payload_json FROM cloud_sandbox_workspaces`.pipe(
-      Effect.mapError(() => failure("Unable to read the cloud workspace journal.")),
-    );
-    let repointed = 0;
-    for (const row of rows) {
-      const didRepoint = yield* Effect.gen(function* () {
-        const record = yield* decode(row.payload_json);
-        if (
-          record.phase === "deleted" ||
-          record.phase === "resource-deleted" ||
-          record.childEnvironmentId === undefined
-        )
-          return false;
-        yield* links.repoint(
-          record.childEnvironmentId,
-          `http://127.0.0.1:${port}${managedCloudSandboxProxyPath(record.workspaceId)}`,
-        );
-        return true;
-      }).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("Failed to repoint cloud workspace link; continuing.", {
-            workspaceId: row.workspace_id,
-            cause,
-          }).pipe(Effect.as(false)),
-        ),
-      );
-      if (didRepoint) repointed++;
-    }
-    return repointed;
-  });
-  /**
-   * The journal is the source of truth for one workspace id: a retry with the
-   * same request returns the stored result, and any other request is refused.
-   */
-  const createWorkspace = Effect.fn("CloudSandboxWorkspaces.createWorkspace")(function* (
-    scope: McpThreadInvocationScope,
-    input: {
-      readonly workspaceId: ManagedCloudSandboxResourceId;
-      readonly requestJson: string;
-      readonly branch: string;
-      readonly note: string;
-      readonly acquire: Effect.Effect<AcquiredWorkspace, WorktreeMcpFailure>;
-      readonly delegate: (acquired: {
-        readonly connection: ManagedCloudSandboxConnection;
-        readonly childProjectId: ProjectId;
-      }) => Effect.Effect<
-        Pick<SandboxWorktreeHandoffResult, "taskId" | "threadId" | "projectId">,
-        WorktreeMcpFailure
-      >;
-      /** Binds the resource to its owner once the delegated child task exists,
-       * with the retention the delegating flow asked for. */
-      readonly owner: (
-        delegated: { readonly taskId: string },
-        connection: ManagedCloudSandboxConnection,
-      ) => {
-        readonly owner: ManagedSandboxFollowerOwner;
-        readonly retention?: ManagedSandboxRetention | undefined;
-      };
-    },
-  ) {
-    const { workspaceId, requestJson } = input;
-    const requestScope = workspaceScope(scope, workspaceId);
-    return yield* lock.withLock(
-      workspaceId,
-      Effect.gen(function* () {
-        if (!(yield* links.enabled))
-          return yield* invalid(
-            "Enable Linked environments in Settings → Labs before sandbox isolation.",
-          );
-        const previous = yield* load(workspaceId);
-        if (Option.isSome(previous)) {
-          if (
-            previous.value.sourceThreadId !== scope.thread.threadId ||
-            previous.value.requestJson !== requestJson
-          )
-            return yield* invalid("This workspace id already belongs to another request.");
-          if (
-            previous.value.phase === "deleted" ||
-            previous.value.phase === "deleting" ||
-            previous.value.phase === "resource-deleted"
-          )
-            return yield* invalid("This cloud workspace is being deleted or has been deleted.");
-          if (previous.value.result) return previous.value.result;
-        }
-        let record: typeof Record.Type = {
-          ...(Option.isSome(previous) ? previous.value : {}),
-          workspaceId,
-          sourceThreadId: scope.thread.threadId,
-          requestJson,
-          phase: "creating",
-          result: null,
-        };
-        yield* save(record);
-        const acquired = yield* input.acquire;
-        record = { ...record, childEnvironmentId: acquired.connection.environmentId };
-        yield* save(record);
-        let workspacePath: string | undefined;
-        if (acquired.prepareCheckout) workspacePath = yield* acquired.prepareCheckout;
-        const parent = yield* threads
-          .getThreadRecords(scope.thread.threadId, [])
-          .pipe(Effect.mapError(() => failure("Unable to read the source thread.")));
-        const attached = yield* attachProject(requestScope, {
-          connection: acquired.connection,
-          pairingToken: acquired.pairingToken,
-          linkUrl: acquired.linkUrl,
-          sourceProjectId: parent.thread.projectId,
-          branch: input.branch,
-          ...(workspacePath === undefined ? {} : { workspacePath }),
-        });
-        const delegated = yield* input.delegate({
-          connection: acquired.connection,
-          childProjectId: attached.childProjectId,
-        });
-        // Task ownership binds after the child exists; a failed bind keeps the
-        // resource visible as user-owned until a retry or the orphan sweep.
-        const bound = input.owner({ taskId: delegated.taskId }, acquired.connection);
-        yield* bindResourceOwner(acquired.connection.resourceId, bound.owner, bound.retention).pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning(
-              "Unable to bind sandbox ownership; the workspace stays user-owned until a retry.",
-              { workspaceId, cause },
-            ).pipe(Effect.asVoid),
-          ),
-        );
-        const result: SandboxWorktreeHandoffResult = {
-          kind: "sandbox",
-          workspaceId,
-          resourceId: acquired.connection.resourceId,
-          environmentId: acquired.connection.environmentId,
-          projectId: delegated.projectId,
-          threadId: delegated.threadId,
-          taskId: delegated.taskId,
-          workspacePath: attached.workspacePath,
-          branch: input.branch,
-          note: input.note,
-        };
-        yield* save({ ...record, phase: "running", result });
-        return result;
-      }),
-    );
   });
   /**
    * Tells each delegated task's card when its follower sandbox is degraded, and
@@ -705,6 +390,8 @@ export const make = Effect.gen(function* () {
       );
   });
 
+  const lifecycle = yield* WorkspaceLifecycle.make({ tellTask });
+
   const reportedIssues = new Map<
     string,
     {
@@ -737,12 +424,15 @@ export const make = Effect.gen(function* () {
         readonly taskId: string;
       }
     >();
+    for (const issue of yield* lifecycle.pendingBindingIssues)
+      failing.set(`${issue.sourceThreadId}\u0000${issue.taskId}`, issue);
     for (const resource of resources) {
       const { owner } = resource;
       if (owner._tag !== "task" || owner.hostEnvironmentId !== resource.controllerEnvironmentId) {
         continue;
       }
       const row = { sourceThreadId: owner.sourceThreadId, taskId: owner.taskId };
+      if (failing.has(`${owner.sourceThreadId}\u0000${owner.taskId}`)) continue;
       if (resource.issue === undefined)
         healthy.set(`${owner.sourceThreadId}\u0000${owner.taskId}`, row);
       else
@@ -792,7 +482,7 @@ export const make = Effect.gen(function* () {
         reconciledOwners.add(key);
       }
     }
-    return failing.size;
+    return failing.size + (yield* lifecycle.reportControllerIssues);
   });
   const every = <A, E>(interval: Duration.Input, tick: Effect.Effect<A, E>, stopped: string) =>
     tick.pipe(
@@ -900,7 +590,7 @@ export const make = Effect.gen(function* () {
       const requestJson = yield* encodeRequest(input).pipe(
         Effect.mapError(() => invalid("The workspace request is invalid.")),
       );
-      return yield* createWorkspace(scope, {
+      return yield* lifecycle.createWorkspace(scope, {
         workspaceId,
         requestJson,
         branch: input.branch,
@@ -911,6 +601,8 @@ export const make = Effect.gen(function* () {
           isolation.size,
           isolation.autoStopMinutes,
         ),
+        prepare: (acquired) =>
+          prepareWorkspace(workspaceScope(scope, workspaceId), input.branch, acquired),
         delegate: ({ connection, childProjectId }) =>
           delegation
             .delegateWorkspace(
@@ -946,59 +638,11 @@ export const make = Effect.gen(function* () {
         }),
       });
     }),
-    remove: Effect.fn("CloudSandboxWorkspaces.remove")(function* (scope, workspaceId) {
-      const resourceId = yield* decodeResourceId(workspaceId).pipe(
-        Effect.mapError(() => invalid("Invalid owned sandbox resource ID.")),
-      );
-      return yield* lock.withLock(
-        resourceId,
-        Effect.gen(function* () {
-          const saved = yield* load(resourceId);
-          if (Option.isNone(saved) || saved.value.sourceThreadId !== scope.thread.threadId)
-            return yield* invalid("The calling thread does not own this cloud workspace.");
-          const record = saved.value;
-          if (record.phase === "deleted") return { workspaceId, deleted: true };
-          if (record.phase !== "resource-deleted") {
-            yield* save({ ...record, phase: "deleting" });
-            if (record.result) {
-              // Deleting the VM stops the child's work anyway, so an unreachable proxy must not block cleanup.
-              yield* forwarding
-                .interruptThread(scope, record.result.environmentId, {
-                  threadId: record.result.threadId,
-                })
-                .pipe(
-                  Effect.timeout("10 seconds"),
-                  Effect.catch((cause) =>
-                    Effect.logWarning("Unable to stop active work in the child workspace.", {
-                      workspaceId,
-                      cause,
-                    }),
-                  ),
-                );
-            }
-            yield* releaseResource(record.workspaceId);
-            yield* save({ ...record, phase: "resource-deleted" });
-          }
-          const childEnvironmentId = record.childEnvironmentId ?? record.result?.environmentId;
-          if (childEnvironmentId)
-            yield* links
-              .unlink(childEnvironmentId)
-              .pipe(
-                Effect.mapError(() =>
-                  failure(
-                    "The sandbox was deleted, but its peer link could not be removed. Retry cleanup.",
-                  ),
-                ),
-              );
-          yield* save({ ...record, phase: "deleted" });
-          return { workspaceId, deleted: true };
-        }),
-      );
-    }),
+    remove: lifecycle.remove,
     sharePreview: Effect.fn("CloudSandboxWorkspaces.sharePreview")(function* (port) {
       if (!(yield* controller.available))
         return yield* invalid("Preview sharing requires a managed cloud environment.");
-      const controllerPort = yield* localServerPort;
+      const controllerPort = yield* lifecycle.localServerPort;
       if (port === controllerPort || port === config.port || port === MANAGED_CLOUD_SOURCE_PORT)
         return yield* invalid("The environment control server cannot be shared as a preview.");
       const hosted = yield* controller.request({ _tag: "host", port });
@@ -1055,12 +699,14 @@ export const make = Effect.gen(function* () {
           autoStopMinutes: input.autoStopMinutes,
           profile: input.profile,
         }).pipe(Effect.mapError(() => invalid("The workspace request is invalid.")));
-        return yield* createWorkspace(scope, {
+        return yield* lifecycle.createWorkspace(scope, {
           workspaceId,
           requestJson,
           branch: input.branch,
           note: "The task runs in a disposable sandbox workspace. It is reclaimed automatically once its source thread is deleted and the sandbox has stopped; deleting it earlier removes the sandbox.",
           acquire,
+          prepare: (acquired) =>
+            prepareWorkspace(workspaceScope(scope, workspaceId), input.branch, acquired),
           delegate: ({ connection, childProjectId }) =>
             delegation
               .delegateWorkspace(
@@ -1108,8 +754,9 @@ export const make = Effect.gen(function* () {
         });
       },
     ),
-    sweep: sweepOnce(),
-    repointLinks: repointLinks(),
+    recoverOwnership: lifecycle.recoverOwnership,
+    sweep: lifecycle.sweep,
+    repointLinks: lifecycle.repointLinks,
     reportIssues: reportIssues(),
     /**
      * Reclaim-safe on failure: a sweep that cannot read the journal tries
@@ -1119,9 +766,13 @@ export const make = Effect.gen(function* () {
     start: Effect.fn("CloudSandboxWorkspaces.start")(() =>
       Effect.all(
         [
-          every("30 minutes", sweepOnce(), "Cloud workspace sweep stopped."),
-          every("1 minute", repointLinks(), "Cloud workspace link repointing stopped."),
-          every("30 seconds", reportIssues(), "Cloud sandbox issue reporting stopped."),
+          every("30 minutes", lifecycle.sweep, "Cloud workspace sweep stopped."),
+          every("1 minute", lifecycle.repointLinks, "Cloud workspace link repointing stopped."),
+          every(
+            "30 seconds",
+            lifecycle.recoverOwnership.pipe(Effect.ignore, Effect.andThen(reportIssues())),
+            "Cloud sandbox issue reporting stopped.",
+          ),
         ],
         { discard: true },
       ),

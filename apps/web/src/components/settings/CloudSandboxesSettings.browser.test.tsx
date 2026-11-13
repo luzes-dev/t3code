@@ -243,6 +243,29 @@ describe("CloudSandboxesSettings", () => {
     await vi.waitFor(() => expect(mocks.refresh).toHaveBeenCalledOnce());
   });
 
+  it("replaces a profile credential without removing its existing sandboxes", async () => {
+    setup({ profiles: [boatProfile], sandboxes: [connectedSandbox] });
+    mocks.saveProfile.mockResolvedValueOnce(AsyncResult.success(undefined));
+    await using screen = await render(
+      <AppAtomRegistryProvider>
+        <CloudSandboxesSettings />
+      </AppAtomRegistryProvider>,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await userEvent.type(screen.getByLabelText("Replacement API key"), "replacement-key");
+    await userEvent.click(screen.getByRole("button", { name: "Save", exact: true }));
+
+    await vi.waitFor(() =>
+      expect(mocks.saveProfile).toHaveBeenCalledWith({
+        environmentId: "environment-primary-1",
+        input: expect.objectContaining({ profileId: "boat-demo", apiKey: "replacement-key" }),
+      }),
+    );
+    expect(mocks.deleteSandbox).not.toHaveBeenCalled();
+    await expect.element(screen.getByLabelText("Replacement API key")).not.toBeInTheDocument();
+  });
+
   it("deletes a created sandbox only after the user confirms", async () => {
     setup({ profiles: [], sandboxes: [connectedSandbox] });
     mocks.confirm.mockResolvedValueOnce(false);

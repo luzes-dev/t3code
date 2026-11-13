@@ -120,20 +120,34 @@ it.effect("rejects undiscovered ports and preserves protected preview paths and 
     expect(forwards).toBe(1);
     expect(spawnedArgs[0]?.find((arg) => arg.startsWith("BatchMode="))).toBe("BatchMode=yes");
     expect(spawnedArgs[0]).not.toContain("BatchMode=no");
-    yield* service.open({ resourceId, url: "http://localhost:5173/", access: "local" });
-    expect(forwards).toBe(2);
+    const samePort = yield* service.open({
+      resourceId,
+      url: "http://localhost:5173/",
+      access: "local",
+    });
+    expect(new URL(samePort.url).port).toBe(new URL(local.url).port);
+    expect(forwards).toBe(1);
     yield* service.open({ resourceId, url: local.url, close: true });
     expect(forwards).toBe(1);
+    yield* service.open({ resourceId, url: samePort.url, close: true });
+    expect(forwards).toBe(0);
     blockReadiness = true;
     const interruptedFiber = yield* service
       .open({ resourceId, url: "http://localhost:5173/", access: "local" })
       .pipe(Effect.forkChild);
     yield* Deferred.await(readinessEntered);
     yield* Fiber.interrupt(interruptedFiber);
-    expect(forwards).toBe(1);
+    expect(forwards).toBe(0);
     blockReadiness = false;
-    yield* service.open({ resourceId, url: "http://localhost:5173/", access: "local" });
-    expect(forwards).toBe(2);
+    const concurrent = yield* Effect.all(
+      [
+        service.open({ resourceId, url: "http://localhost:5173/", access: "local" }),
+        service.open({ resourceId, url: "http://localhost:5173/other", access: "local" }),
+      ],
+      { concurrency: "unbounded" },
+    );
+    expect(new URL(concurrent[0].url).port).toBe(new URL(concurrent[1].url).port);
+    expect(forwards).toBe(1);
     yield* Scope.close(resourceScope, Exit.void);
     expect(forwards).toBe(0);
   }),

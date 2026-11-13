@@ -43,7 +43,10 @@ owning task is still running; the orchestrator projects it into
 `remoteChild.sandboxIssue` on the parent thread through the usual
 `subagent.updated` event, so task cards render a degraded state and its
 clearance with no new transport, no synthetic turn items, and no waking of the
-delegated child. Settings collapse per-controller issues by
+delegated child. For nested followers, the intermediate environment locates
+resources in its workspace journals, reads their state through its authenticated
+controller route, and reconciles issues onto its own tasks. Unreadable resources preserve the last task issue
+until a successful read confirms recovery. Settings collapse per-controller issues by
 `driverKind:profileId:cause` into one "Follower issues" banner per dead cloud
 profile (one fix: re-login on that profile), while per-resource rows keep the
 individual detail.
@@ -74,9 +77,15 @@ payload. No new migration was required, and none should reuse `081`.
 - Old payloads without `owner`/`retention` decode as `user`/`manual`
   (`withDecodingDefault` in the contract), so upgraded records remain visible
   and selectable in Settings. Payloads without `issue` decode with no issue.
-- Delegated workspace journals remain the recovery source for child state;
-  owner binding after delegation is a no-fail side effect (a failed bind keeps
-  the resource user-owned and sweep-recoverable rather than guessing).
+- Delegated workspace journals persist the child result and ownership intent
+  before binding. A failed bind preserves the task and workspace, reports a
+  pending issue on the task, and retries on the same request and reconciliation
+  after restart. Clearing that issue is durable too, so a failed task update
+  does not lose recovery progress.
+- Older completed journals without binding intent are repaired conservatively:
+  bound retention remains authoritative; previously unbound resources use
+  stop-and-retain because the original cleanup intent was never stored.
+  Recovery never changes an existing different owner or revives deleted workspaces.
 
 Rollback: decoding ignores the new fields when absent, so records written by
 this build are read by older builds as ownerless user resources; binds are lost

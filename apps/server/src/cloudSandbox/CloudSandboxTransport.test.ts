@@ -288,7 +288,7 @@ it.effect("returns an unconsumed peer credential after exchanging the transport 
   ),
 );
 
-it.effect("pins the first host key and refuses a changed key until the resource is dropped", () =>
+it.effect("uses the provider-attested host key after a sandbox restart", () =>
   Effect.gen(function* () {
     const config = Context.get(
       yield* Layer.build(
@@ -406,31 +406,20 @@ it.effect("pins the first host key and refuses a changed key until the resource 
     };
     const first = yield* make.pipe(Effect.provide(layers));
 
-    // First connect pins; a reconnect with the same key still passes.
     yield* first.connect(connectInput);
     yield* first.connect(connectInput);
 
-    // A changed key for the same resource fails the connect.
+    // Boat recreates the SSH host key when the same sandbox resumes.
     hostKey = "ssh-ed25519 rotated BBBB";
-    const refused = yield* first.connect(connectInput).pipe(Effect.result);
-    expect(refused._tag).toBe("Failure");
-    if (refused._tag === "Failure")
-      expect(
-        String((refused.failure as { cause?: { message?: string } }).cause?.message),
-      ).toContain("host key changed");
+    yield* first.connect(connectInput);
+    const knownHostsFiles = (yield* fs.readDirectory(directory)).filter((file) =>
+      file.endsWith(".known-hosts"),
+    );
+    expect(knownHostsFiles).toHaveLength(1);
+    expect(yield* fs.readFileString(`${directory}/${knownHostsFiles[0]}`)).toContain(hostKey);
 
-    // The pin survives a restart: a fresh transport instance refuses too.
     const restarted = yield* make.pipe(Effect.provide(layers));
-    const refusedAcrossRestart = yield* restarted.connect(connectInput).pipe(Effect.result);
-    expect(refusedAcrossRestart._tag).toBe("Failure");
-
-    // Deleting the resource forgets the pin, so a replacement bootstraps anew
-    // and the first connect after it re-pins the replacement's key.
-    yield* restarted.forgetHostKey("pinned");
     yield* restarted.connect(connectInput);
-    expect(JSON.parse(yield* fs.readFileString(`${directory}/host-pins.json`))).toMatchObject({
-      pinned: { hostKey: "ssh-ed25519 rotated BBBB" },
-    });
   }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)), Effect.scoped),
 );
 

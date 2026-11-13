@@ -43,11 +43,12 @@ export const openSandboxPreview = createRuntimeCommand(connectionAtomRuntime, {
         reason: "configuration",
         detail: "This environment has no managed cloud sandbox.",
       });
+    const url = new URL(input.url);
     const permissionInput = {
       resourceId: status.resourceId,
       operation: {
         _tag: "host",
-        port: Number(new URL(input.url).port || 80),
+        port: Number(url.port || (url.protocol === "https:" ? 443 : 80)),
         isPublic: false,
       },
     } as const;
@@ -87,7 +88,7 @@ export const cloudSandboxStatusAtom = Atom.family((environmentId: EnvironmentId)
 
 const managedSandboxes = createManagedSandboxAtoms(connectionAtomRuntime);
 export const managedSandboxesAtom = managedSandboxes.list;
-// Pickers read this owner-derived view; the full list stays for admin surfaces.
+// Owner-derived resources, separate from the controller administration list.
 export const selectableManagedSandboxesAtom = managedSandboxes.selectable;
 // Degraded followers, collapsed per cause: one warning naming one fix.
 export const managedSandboxIssuesAtom = managedSandboxes.issues;

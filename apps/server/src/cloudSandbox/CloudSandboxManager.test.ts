@@ -226,7 +226,7 @@ it.effect("marks a connected record stopped on restart without resuming its VM",
   }).pipe(Effect.scoped),
 );
 
-it.effect("stops a live route when its VM stops, and later reconciles leave it alone", () =>
+it.effect("stops a live route when its VM stops, and later reconciles only observe it", () =>
   Effect.gen(function* () {
     const f = fixture();
     const manager = yield* f.manager;
@@ -246,7 +246,7 @@ it.effect("stops a live route when its VM stops, and later reconciles leave it a
     expect(f.resumes()).toBe(0);
     const requests = f.requests();
     yield* manager.reconcile;
-    expect(f.requests()).toBe(requests);
+    expect(f.requests()).toBe(requests + 1);
     expect(f.connections()).toBe(1);
     expect((yield* manager.get(id)).phase).toBe("stopped");
   }).pipe(Effect.scoped),
@@ -494,6 +494,60 @@ it.effect(
       expect(f.records.get(id)?.sandboxId).toBe("bx_23456789");
       expect(f.records.get(id)?.lifecycle).toBe("deleting");
       expect(f.records.get(id)?.enableLinkedEnvironments).toBe(true);
+    }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "preserves a connected fork when snapshot cleanup fails and retries missing snapshots",
+  () =>
+    Effect.gen(function* () {
+      const f = fixture();
+      const manager = yield* f.manager;
+      const source = ManagedCloudSandboxResourceId.make("cleanup-source");
+      yield* manager.provision({
+        operationId: source,
+        profile: SandboxProfileId.make("fixture"),
+        sandbox: { name: "source", size: "small", autoStopMinutes: 15 },
+      });
+      const child = ManagedCloudSandboxResourceId.make("cleanup-child");
+      let cleanupFailed = false;
+      f.setResponse((url, method) => {
+        if (!url.includes("saved-snapshots")) return undefined;
+        if (method === "DELETE") {
+          const status = cleanupFailed ? 404 : 503;
+          cleanupFailed = true;
+          return Response.json({ error: "cleanup unavailable" }, { status });
+        }
+        return Response.json({
+          ok: true,
+          snapshot: {
+            name: `t3-${child}`,
+            status: "ready",
+            sourceSandboxId: "bx_23456789",
+          },
+        });
+      });
+      const result = yield* manager
+        .fork({ sourceResourceId: source, operationId: child, name: "child" })
+        .pipe(Effect.result);
+      expect(result._tag).toBe("Failure");
+      expect(f.records.get(child)).toMatchObject({
+        lifecycle: "active",
+        environmentId: "child",
+        snapshotName: `t3-${child}`,
+      });
+      expect(f.stops()).toBe(0);
+      const creates = f
+        .bodies()
+        .filter(([method, url]) => method === "POST" && url.endsWith("/sandboxes")).length;
+      yield* manager.reconcile;
+      expect((yield* manager.get(child)).phase).toBe("connected");
+      expect(f.records.get(child)?.snapshotName).toBeNull();
+      expect((yield* manager.get(child)).issue).toBeUndefined();
+      expect(f.stops()).toBe(0);
+      expect(
+        f.bodies().filter(([method, url]) => method === "POST" && url.endsWith("/sandboxes")),
+      ).toHaveLength(creates);
     }).pipe(Effect.scoped),
 );
 
@@ -776,6 +830,246 @@ it.effect("enforces allocation budgets while preserving accepted retries", () =>
       })
       .pipe(Effect.result);
     expect(corruptedBudget).toMatchObject({ _tag: "Failure", failure: { reason: "budget" } });
+    f.setSpend(profile, 0);
+    f.setBudget(5);
+    const extensions = f.extensions();
+    expect(
+      yield* manager.execute(source, { _tag: "extend", hours: 720 }).pipe(Effect.result),
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "budget" } });
+    expect(f.extensions()).toBe(extensions);
+    expect(yield* manager.execute(source, { _tag: "extend", hours: 1 })).toMatchObject({
+      _tag: "status",
+    });
+    expect(f.extensionTtls().at(-1)).toBe(3600);
+    expect(f.records.get(source)?.selection.autoStopMinutes).toBe(15);
+    yield* manager.execute(source, { _tag: "extend", hours: 100 });
+    f.setResponse((_url, method) =>
+      method === "PATCH" ? Response.json({ error: "unavailable" }, { status: 503 }) : undefined,
+    );
+    expect(
+      yield* manager.execute(source, { _tag: "extend", hours: 1 }).pipe(Effect.result),
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "provider" } });
+    expect(f.records.get(source)?.reservation?.autoStopMinutes).toBe(6000);
+    f.setBudget(1.8);
+    f.setResponse((url) =>
+      url.endsWith("/usage")
+        ? Response.json({
+            ok: true,
+            sandboxId: "bx_23456789",
+            sandboxType: "small",
+            billingMultiplier: 1,
+            seconds: 0,
+            dollars: 0,
+            secondsPerDollar: 480,
+            running: true,
+            since: "2026-01-01T00:00:00Z",
+            until: "2026-01-01T00:00:00Z",
+          })
+        : undefined,
+    );
+    expect(
+      yield* manager
+        .provision({ ...input, operationId: ManagedCloudSandboxResourceId.make("after-extension") })
+        .pipe(Effect.result),
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "budget" } });
+    f.setBudget(5);
+    yield* manager.execute(source, { _tag: "extend", hours: 1 });
+    expect(f.records.get(source)?.reservation?.autoStopMinutes).toBe(60);
+    f.setBudget(null);
+    const child = ManagedCloudSandboxResourceId.make("budget-retry-child");
+    f.setResponse((url, method) =>
+      url.includes("saved-snapshots")
+        ? Response.json(
+            method === "DELETE"
+              ? { ok: true }
+              : {
+                  ok: true,
+                  snapshot: {
+                    name: `t3-${child}`,
+                    status: "ready",
+                    sourceSandboxId: "bx_23456789",
+                  },
+                },
+          )
+        : undefined,
+    );
+    const forkInput = { sourceResourceId: source, operationId: child, name: "child" };
+    yield* manager.fork(forkInput);
+    yield* manager.execute(child, { _tag: "stop" });
+    f.setState("stopped");
+    f.setBudget(0);
+    expect(yield* manager.fork(forkInput).pipe(Effect.result)).toMatchObject({
+      _tag: "Failure",
+      failure: { reason: "budget" },
+    });
+    f.setBudget(0.02);
+    expect(
+      yield* manager.execute(child, { _tag: "resize", size: "xlarge" }).pipe(Effect.result),
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "budget" } });
+    f.setBudget(null);
+    f.setMaxConcurrent(1);
+    expect(yield* manager.fork(forkInput).pipe(Effect.result)).toMatchObject({
+      _tag: "Failure",
+      failure: { reason: "concurrency" },
+    });
+    expect(
+      yield* manager.execute(child, { _tag: "resize", size: "xlarge" }).pipe(Effect.result),
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "concurrency" } });
+    expect(f.resumes()).toBe(0);
+    f.setMaxConcurrent(100);
+    let resized = false;
+    f.setResponse((url, method) => {
+      if (method === "POST" && url.endsWith("/resume")) {
+        f.setState("ready");
+        resized = true;
+      }
+      return resized && !url.endsWith("/usage")
+        ? Response.json({
+            ok: true,
+            sandbox: { id: "bx_23456789", name: "child", state: "ready", type: "xlarge" },
+          })
+        : undefined;
+    });
+    expect(yield* manager.execute(child, { _tag: "resize", size: "xlarge" })).toMatchObject({
+      _tag: "status",
+      sandbox: { state: "ready" },
+    });
+    expect(f.records.get(child)).toMatchObject({
+      selection: { size: "xlarge" },
+      power: "running",
+      intent: "connected",
+    });
+  }).pipe(Effect.scoped),
+);
+
+it.effect.each([
+  { initial: "m-large", requested: "m-standard", observable: true, sizeReported: true },
+  { initial: "m-large", requested: "m-standard", observable: false, sizeReported: true },
+  { initial: "m-standard", requested: "m-large", observable: false, sizeReported: true },
+  { initial: "m-standard", requested: "m-large", observable: true, sizeReported: false },
+])(
+  "preserves resize cost uncertainty for $initial to $requested, observable=$observable",
+  ({ initial, requested, observable, sizeReported }) =>
+    Effect.gen(function* () {
+      const base = makeTestCloudSandboxDriver();
+      let canObserve = true;
+      let actualSize = initial;
+      const driver: BaseCloudSandboxDriver = {
+        ...base.driver,
+        get: (id) =>
+          canObserve
+            ? base.driver.get(id).pipe(
+                Effect.map(({ size: _size, ...details }) => ({
+                  ...details,
+                  ...(sizeReported ? { size: actualSize } : {}),
+                })),
+              )
+            : Effect.fail(
+                new CloudSandboxError({
+                  reason: "unavailable",
+                  cause: new Error("Provider unavailable."),
+                }),
+              ),
+        keepalive: { extendAutoStop: (id) => base.driver.get(id) },
+        resizing: {
+          mode: "restart",
+          resize: () =>
+            Effect.gen(function* () {
+              canObserve = observable;
+              if (initial === "m-standard") actualSize = requested;
+              return yield* new CloudSandboxError({
+                reason: "unavailable",
+                cause: new Error("Provider unavailable."),
+              });
+            }),
+        },
+      };
+      const f = fixture(
+        false,
+        Effect.void,
+        { active: false },
+        { create: () => Effect.succeed(driver) },
+      );
+      f.setDriverKind("custom");
+      const manager = yield* f.manager;
+      const id = ManagedCloudSandboxResourceId.make("resize-uncertain");
+      yield* manager.provision({
+        operationId: id,
+        profile: SandboxProfileId.make("fixture"),
+        sandbox: { name: "resize", size: initial, autoStopMinutes: 15 },
+      });
+      expect(
+        (yield* manager.execute(id, { _tag: "resize", size: requested }).pipe(Effect.result))._tag,
+      ).toBe("Failure");
+      expect(f.records.get(id)?.selection.size).toBe(initial);
+      f.setBudget(0.5);
+      expect(
+        yield* manager.execute(id, { _tag: "extend", hours: 10 }).pipe(Effect.result),
+      ).toMatchObject({ _tag: "Failure", failure: { reason: "budget" } });
+      f.setBudget(0.04);
+      expect(
+        yield* manager
+          .provision({
+            operationId: ManagedCloudSandboxResourceId.make("after-resize"),
+            profile: SandboxProfileId.make("fixture"),
+            sandbox: { name: "new", size: "m-standard", autoStopMinutes: 15 },
+          })
+          .pipe(Effect.result),
+      ).toMatchObject({ _tag: "Failure", failure: { reason: "budget" } });
+    }).pipe(Effect.scoped),
+);
+
+it.effect("retains the explicit lifetime reservation through a later resize", () =>
+  Effect.gen(function* () {
+    const base = makeTestCloudSandboxDriver();
+    let size = "m-standard";
+    const details = (id: string) =>
+      base.driver.get(id).pipe(Effect.map((sandbox) => ({ ...sandbox, size })));
+    const driver: BaseCloudSandboxDriver = {
+      ...base.driver,
+      get: details,
+      keepalive: { extendAutoStop: details },
+      resizing: {
+        mode: "restart",
+        resize: (id, nextSize) => {
+          size = nextSize;
+          return details(id);
+        },
+      },
+    };
+    const f = fixture(
+      false,
+      Effect.void,
+      { active: false },
+      { create: () => Effect.succeed(driver) },
+    );
+    f.setDriverKind("custom");
+    const manager = yield* f.manager;
+    const id = ManagedCloudSandboxResourceId.make("extended-resize");
+    yield* manager.provision({
+      operationId: id,
+      profile: SandboxProfileId.make("fixture"),
+      sandbox: { name: "long-running", size: "m-standard", autoStopMinutes: 15 },
+    });
+    yield* manager.execute(id, { _tag: "extend", hours: 10 });
+    f.setBudget(1);
+    expect(
+      yield* manager.execute(id, { _tag: "resize", size: "m-large" }).pipe(Effect.result),
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "budget" } });
+    f.setBudget(3);
+    yield* manager.execute(id, { _tag: "resize", size: "m-large" });
+    expect(f.records.get(id)?.reservation).toEqual({ size: "m-large", autoStopMinutes: 600 });
+    expect(yield* manager.get(id)).not.toHaveProperty("reservation");
+    f.setBudget(2);
+    expect(
+      yield* manager
+        .provision({
+          operationId: ManagedCloudSandboxResourceId.make("after-extended-resize"),
+          profile: SandboxProfileId.make("fixture"),
+          sandbox: { name: "new", size: "m-standard", autoStopMinutes: 15 },
+        })
+        .pipe(Effect.result),
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "budget" } });
   }).pipe(Effect.scoped),
 );
 
@@ -1033,10 +1327,15 @@ it.effect("records a failed release's lifetime spend once when the retry complet
           ? Response.json(completedDeletion)
           : Response.json({ message: "forbidden" }, { status: 403 });
       }
+      if (url.endsWith("/deletion-operations/lost-operation"))
+        return Response.json({ message: "operation expired" }, { status: 404 });
       if (url.includes("/deletion-operations/")) return Response.json(completedDeletion);
       return undefined;
     });
     expect((yield* manager.release(id).pipe(Effect.result))._tag).toBe("Failure");
+    f.records.set(id, { ...f.records.get(id)!, deletionOperationId: "lost-operation" });
+    expect((yield* manager.release(id).pipe(Effect.result))._tag).toBe("Failure");
+    expect(f.records.get(id)).toMatchObject({ lifecycle: "deleting", deletionOperationId: null });
     deletionAccepted = true;
     yield* manager.release(id);
     expect(f.spent(profile)).toBe(1.25);
@@ -1308,6 +1607,126 @@ it.effect("binds a provisioned resource to a follower owner and refuses hostile 
     expect(takeover._tag).toBe("Failure");
     expect(yield* manager.get(id)).toMatchObject({
       owner: { _tag: "task", taskId: "task-1" },
+      issue: { cause: "bind" },
     });
+    yield* manager.bindOwner(id, {
+      _tag: "task",
+      hostEnvironmentId: EnvironmentId.make("controller"),
+      sourceThreadId: ThreadId.make("thread-1"),
+      taskId: "task-1",
+    });
+    expect((yield* manager.get(id)).issue).toBeUndefined();
+    const child = ManagedCloudSandboxResourceId.make("nested-follower");
+    f.setResponse((url, method) =>
+      url.includes("saved-snapshots")
+        ? Response.json(
+            method === "DELETE"
+              ? { ok: true }
+              : {
+                  ok: true,
+                  snapshot: {
+                    name: `t3-${child}`,
+                    status: "ready",
+                    sourceSandboxId: "bx_23456789",
+                  },
+                },
+          )
+        : undefined,
+    );
+    const token = Hex.encode(f.values.get(`cloud-source-${id}`)!);
+    yield* manager.executeSource(id, token, {
+      _tag: "fork",
+      operationId: child,
+      name: "nested",
+    });
+    expect((yield* manager.get(child)).owner).toEqual({ _tag: "user" });
+    yield* manager.executeSource(id, token, {
+      _tag: "bindOwner",
+      resourceId: child,
+      owner: {
+        _tag: "task",
+        hostEnvironmentId: EnvironmentId.make("untrusted-host"),
+        sourceThreadId: ThreadId.make("nested-thread"),
+        taskId: "nested-task",
+      },
+      retention: "delete-on-completion",
+    });
+    expect(yield* manager.get(child)).toMatchObject({
+      owner: {
+        _tag: "task",
+        hostEnvironmentId: EnvironmentId.make("child"),
+        sourceThreadId: "nested-thread",
+        taskId: "nested-task",
+      },
+      retention: "delete-on-completion",
+    });
+    const childOwner = {
+      _tag: "task",
+      hostEnvironmentId: EnvironmentId.make("untrusted-host"),
+      sourceThreadId: ThreadId.make("nested-thread"),
+      taskId: "nested-task",
+    } as const;
+    const refused = yield* manager
+      .executeSource(id, token, {
+        _tag: "bindOwner",
+        resourceId: child,
+        owner: { ...childOwner, taskId: "takeover" },
+      })
+      .pipe(Effect.result);
+    expect(refused._tag).toBe("Failure");
+    expect((yield* manager.get(child)).issue?.cause).toBe("bind");
+    yield* manager.executeSource(id, token, {
+      _tag: "bindOwner",
+      resourceId: child,
+      owner: childOwner,
+      retention: "delete-on-completion",
+    });
+    expect((yield* manager.get(child)).issue).toBeUndefined();
   }).pipe(Effect.scoped),
+);
+
+it.effect.each(["connected", "disconnected", "stopped", "deleting"] as const)(
+  "reconciles external provider deletion of a %s sandbox without treating outages as deletion",
+  (phase) =>
+    Effect.gen(function* () {
+      const f = fixture();
+      f.setMaxConcurrent(1);
+      const manager = yield* f.manager;
+      const id = ManagedCloudSandboxResourceId.make("externally-deleted");
+      const input = {
+        operationId: id,
+        profile: SandboxProfileId.make("fixture"),
+        sandbox: { name: "gone", size: "small", autoStopMinutes: 15 },
+      } as const;
+      yield* manager.provision(input);
+      if (phase === "disconnected") yield* manager.disconnect(id);
+      if (phase === "stopped") {
+        yield* manager.execute(id, { _tag: "stop" });
+        f.setState("stopped");
+      }
+      if (phase === "deleting")
+        f.records.set(id, {
+          ...f.records.get(id)!,
+          lifecycle: "deleting",
+          deletionOperationId: "purged-operation",
+          snapshotName: "missing-snapshot",
+        });
+      f.setResponse(() => Response.json({ message: "Unauthorized" }, { status: 401 }));
+      yield* manager.reconcile;
+      expect((yield* manager.get(id)).phase).toBe(phase);
+      f.setResponse(() => Response.json({ message: "Not found" }, { status: 404 }));
+      yield* manager.reconcile;
+      expect((yield* manager.get(id)).phase).toBe("deleted");
+      expect(yield* manager.route(id).pipe(Effect.result)).toMatchObject({ _tag: "Failure" });
+      expect(f.values.has(`cloud-source-${id}`)).toBe(false);
+      yield* manager.release(id);
+      f.setResponse(() => undefined);
+      yield* manager.provision({
+        ...input,
+        operationId: ManagedCloudSandboxResourceId.make("replacement"),
+      });
+      expect((yield* manager.get(ManagedCloudSandboxResourceId.make("replacement"))).phase).toBe(
+        "connected",
+      );
+    }).pipe(Effect.scoped),
 );

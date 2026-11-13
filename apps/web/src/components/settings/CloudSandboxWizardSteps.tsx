@@ -65,7 +65,7 @@ export function CloudSandboxConfiguration({
           <SecretInput
             id="boat-profile-key"
             aria-label="API key"
-            size="sm"
+            size="comfortable"
             configured={storedKeyAvailable}
             disabled={disabled}
             value={draft.apiKey}
@@ -159,7 +159,7 @@ export function CloudSandboxDefaults({
       />
       <SettingsRow
         title={<label htmlFor="boat-monthly-budget">Monthly budget</label>}
-        description="New sandboxes are refused once running costs reach this. Leave blank for no limit."
+        description="Limits admission for new and resumed sandboxes. Running machines can still exceed it. Leave blank for no limit."
         control={
           <Input
             id="boat-monthly-budget"
@@ -175,7 +175,7 @@ export function CloudSandboxDefaults({
       />
       <SettingsRow
         title={<label htmlFor="boat-max-concurrent">Concurrent sandboxes</label>}
-        description="The most this server runs at once."
+        description="The most this profile runs at once."
         control={
           <Input
             id="boat-max-concurrent"

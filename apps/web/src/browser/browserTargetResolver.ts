@@ -107,6 +107,7 @@ interface SandboxedPreviewBase {
   /** The sandbox loopback origin, e.g. `http://localhost:3000`. */
   readonly sandboxOrigin: string;
   readonly providerParams: ReadonlyArray<readonly [string, string]>;
+  readonly users: number;
 }
 
 const previewOrigins = new Map<string, Map<string, SandboxedPreviewBase>>();
@@ -132,11 +133,16 @@ const rememberAliasBase = (environmentId: EnvironmentId, sandboxUrl: URL, aliasU
     if (!sandboxUrl.searchParams.getAll(key).includes(value)) providerParams.push([key, value]);
   }
   const origin = `${aliasUrl.protocol}//${aliasUrl.host}`;
-  sandboxAliasBases(environmentId).set(`${origin}${aliasPathname}`, {
+  const pathPrefix = aliasPathname.slice(0, aliasPathname.length - sandboxPathname.length);
+  const bases = sandboxAliasBases(environmentId);
+  const key = JSON.stringify([origin, pathPrefix, providerParams]);
+  const previous = bases.get(key);
+  bases.set(key, {
     origin,
-    pathPrefix: aliasPathname.slice(0, aliasPathname.length - sandboxPathname.length),
+    pathPrefix,
     sandboxOrigin: `${sandboxUrl.protocol}//${sandboxUrl.host}`,
     providerParams,
+    users: (previous?.users ?? 0) + 1,
   });
 };
 
@@ -147,9 +153,13 @@ const aliasToServerOwnedUrl = (environmentId: EnvironmentId, aliasUrl: string): 
   } catch {
     return null;
   }
-  for (const known of sandboxAliasBases(environmentId).values()) {
+  for (const known of previewOrigins.get(environmentId)?.values() ?? []) {
     if (`${parsed.protocol}//${parsed.host}` !== known.origin) continue;
     if (!parsed.pathname.startsWith(known.pathPrefix)) continue;
+    if (
+      !known.providerParams.every(([key, value]) => parsed.searchParams.getAll(key).includes(value))
+    )
+      continue;
     const restored = new URL(
       `${known.sandboxOrigin}${parsed.pathname.slice(known.pathPrefix.length)}`,
     );
@@ -212,7 +222,7 @@ export async function releaseExternalServerUrl(
 ): Promise<void> {
   if (!isSandboxEnvironment(environmentId)) return;
   if (aliasToServerOwnedUrl(environmentId, url) === null) return;
-  // The server closes the forward it opened, which is keyed by the forwarded URL.
+  // Local forwards close here; provider-issued links follow the provider's lifetime.
   await openSandboxPreview
     .run(appAtomRegistry, {
       environmentId,
@@ -222,6 +232,16 @@ export async function releaseExternalServerUrl(
     })
     .catch(() => undefined);
   const alias = new URL(url);
-  if (alias.hostname === "127.0.0.1")
-    sandboxAliasBases(environmentId).delete(`${alias.protocol}//${alias.host}${alias.pathname}`);
+  const bases = previewOrigins.get(environmentId);
+  for (const [key, base] of bases ?? [])
+    if (
+      `${alias.protocol}//${alias.host}` === base.origin &&
+      alias.pathname.startsWith(base.pathPrefix) &&
+      base.providerParams.every(([key, value]) => alias.searchParams.getAll(key).includes(value))
+    ) {
+      if (base.users > 1) bases?.set(key, { ...base, users: base.users - 1 });
+      else bases?.delete(key);
+      break;
+    }
+  if (bases?.size === 0) previewOrigins.delete(environmentId);
 }

@@ -2647,9 +2647,14 @@ export const layerWsRpc = (
         [WS_METHODS.serverRunStorageCleanup]: () => storageCleanup.runNow,
         [WS_METHODS.serverGetStorageCleanupReport]: () => storageCleanup.reports,
         [WS_METHODS.cloudSandboxControl]: ({ resourceId, operation }) =>
-          cloudSandboxes
-            .execute(resourceId, operation)
-            .pipe(Effect.mapError((cause) => new ManagedCloudSandboxControlError({ cause }))),
+          cloudSandboxes.execute(resourceId, operation).pipe(
+            Effect.mapError(
+              (error) =>
+                new ManagedCloudSandboxControlError({
+                  cause: { reason: error.reason, message: error.message },
+                }),
+            ),
+          ),
         [WS_METHODS.cloudSandboxProfilesList]: () =>
           sandboxProfiles.list.pipe(Effect.map((profiles) => ({ profiles }))),
         [WS_METHODS.cloudSandboxProfilesSave]: (input) => sandboxProfiles.saveStatus(input),

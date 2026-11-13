@@ -142,48 +142,56 @@ export function createBoatApiClient(options: BoatApiClientOptions): BoatApiClien
   const clientLayer = options.httpClient
     ? Layer.succeed(HttpClient.HttpClient, options.httpClient)
     : FetchHttpClient.layer;
-  const request = Effect.fn("BoatApiClient.request")(function* (
-    req: HttpClientRequest.HttpClientRequest,
-  ) {
-    const client = yield* HttpClient.HttpClient;
-    const response = yield* client
-      .execute(
-        req.pipe(HttpClientRequest.bearerToken(options.apiKey), HttpClientRequest.acceptJson),
-      )
-      .pipe(
-        Effect.mapError(
-          (detail) =>
-            new BoatApiError({
-              status: 0,
-              reason: "Unable to connect to Boat.dev. Please check your internet connection.",
-              detail,
-            }),
+  const request = Effect.fn("BoatApiClient.request")(
+    function* (req: HttpClientRequest.HttpClientRequest) {
+      const client = yield* HttpClient.HttpClient;
+      const response = yield* client
+        .execute(
+          req.pipe(HttpClientRequest.bearerToken(options.apiKey), HttpClientRequest.acceptJson),
+        )
+        .pipe(
+          Effect.mapError(
+            (detail) =>
+              new BoatApiError({
+                status: 0,
+                reason: "Unable to connect to Boat.dev. Please check your internet connection.",
+                detail,
+              }),
+          ),
+        );
+      if (response.status >= 400) {
+        const rateLimit =
+          response.status === 429
+            ? parseRateLimit(
+                yield* response.json.pipe(Effect.orElseSucceed(() => undefined)),
+                response.headers["retry-after"],
+              )
+            : undefined;
+        return yield* new BoatApiError({
+          status: response.status,
+          reason:
+            response.status === 401
+              ? "Invalid Boat API key. Please check your credentials."
+              : response.status === 403
+                ? "Boat API key lacks permission. Check its scope and organization."
+                : response.status === 429
+                  ? "Boat API rate limit exceeded. Please try again later."
+                  : "Boat API request failed.",
+          ...(rateLimit ? { rateLimit } : {}),
+        });
+      }
+      if (response.status === 204) return null;
+      return yield* response.json.pipe(Effect.mapError(invalidResponse));
+    },
+    Effect.timeout("90 seconds"),
+    Effect.catchTags({
+      TimeoutError: (detail) =>
+        Effect.fail(
+          new BoatApiError({ status: 408, reason: "Boat API request timed out.", detail }),
         ),
-      );
-    if (response.status >= 400) {
-      const rateLimit =
-        response.status === 429
-          ? parseRateLimit(
-              yield* response.json.pipe(Effect.orElseSucceed(() => undefined)),
-              response.headers["retry-after"],
-            )
-          : undefined;
-      return yield* new BoatApiError({
-        status: response.status,
-        reason:
-          response.status === 401
-            ? "Invalid Boat API key. Please check your credentials."
-            : response.status === 403
-              ? "Boat API key lacks permission. Check its scope and organization."
-              : response.status === 429
-                ? "Boat API rate limit exceeded. Please try again later."
-                : "Boat API request failed.",
-        ...(rateLimit ? { rateLimit } : {}),
-      });
-    }
-    if (response.status === 204) return null;
-    return yield* response.json.pipe(Effect.mapError(invalidResponse));
-  }, Effect.provide(clientLayer));
+    }),
+    Effect.provide(clientLayer),
+  );
   const sandboxPath = (id: string) => `${baseUrl}/sandboxes/${encodeURIComponent(id)}`;
   const getSandbox: BoatApiClient["getSandbox"] = Effect.fn("BoatApiClient.getSandbox")(
     function* (id) {
@@ -259,6 +267,7 @@ export function createBoatApiClient(options: BoatApiClientOptions): BoatApiClien
     listSandboxes: Effect.fn("BoatApiClient.listSandboxes")(function* () {
       const sandboxes: BoatSandboxSummary[] = [];
       let cursor: string | null = null;
+      const seen = new Set<string>();
       do {
         const url = new URL(`${baseUrl}/sandboxes`);
         url.searchParams.set("limit", "200");
@@ -267,6 +276,11 @@ export function createBoatApiClient(options: BoatApiClientOptions): BoatApiClien
         const result = yield* decodeList(json).pipe(Effect.mapError(invalidResponse));
         sandboxes.push(...result.sandboxes.map(mapBoatSandbox));
         cursor = result.nextCursor ?? null;
+        if (cursor !== null) {
+          if (seen.has(cursor))
+            return yield* invalidResponse(new Error("Pagination cursor repeated."));
+          seen.add(cursor);
+        }
       } while (cursor !== null);
       return sandboxes;
     }),
@@ -367,50 +381,62 @@ export function createBoatApiClient(options: BoatApiClientOptions): BoatApiClien
         ),
       ).pipe(Effect.flatMap((json) => decodeCommand(json).pipe(Effect.mapError(invalidResponse))));
     }),
-    getArtifact: Effect.fn("BoatApiClient.getArtifact")(function* (id, path) {
-      const url = new URL(`${sandboxPath(id)}/artifacts`);
-      url.searchParams.set("path", path);
-      const client = yield* HttpClient.HttpClient;
-      const response = yield* client
-        .execute(
-          HttpClientRequest.get(url.toString()).pipe(HttpClientRequest.bearerToken(options.apiKey)),
-        )
-        .pipe(Effect.mapError(invalidResponse));
-      if (response.status !== 200)
-        return yield* new BoatApiError({
-          status: response.status,
-          reason: "Could not download Boat recording.",
-        });
-      const chunks: Uint8Array[] = [];
-      let size = 0;
-      yield* response.stream.pipe(
-        Stream.runForEach((chunk) => {
-          size += chunk.byteLength;
-          if (size > maxArtifactBytes)
-            return Effect.fail(
-              new BoatApiError({
-                status: 413,
-                reason: "Boat recording exceeds the download size limit.",
-              }),
-            );
-          chunks.push(chunk);
-          return Effect.void;
-        }),
-        Effect.mapError((cause) => (isBoatApiError(cause) ? cause : invalidResponse(cause))),
-      );
-      if (size === 0)
-        return yield* new BoatApiError({
-          status: 502,
-          reason: "Boat recording download was empty.",
-        });
-      const result = new Uint8Array(size);
-      let offset = 0;
-      for (const chunk of chunks) {
-        result.set(chunk, offset);
-        offset += chunk.byteLength;
-      }
-      return result;
-    }, Effect.provide(clientLayer)),
+    getArtifact: Effect.fn("BoatApiClient.getArtifact")(
+      function* (id, path) {
+        const url = new URL(`${sandboxPath(id)}/artifacts`);
+        url.searchParams.set("path", path);
+        const client = yield* HttpClient.HttpClient;
+        const response = yield* client
+          .execute(
+            HttpClientRequest.get(url.toString()).pipe(
+              HttpClientRequest.bearerToken(options.apiKey),
+            ),
+          )
+          .pipe(Effect.mapError(invalidResponse));
+        if (response.status !== 200)
+          return yield* new BoatApiError({
+            status: response.status,
+            reason: "Could not download Boat recording.",
+          });
+        const chunks: Uint8Array[] = [];
+        let size = 0;
+        yield* response.stream.pipe(
+          Stream.runForEach((chunk) => {
+            size += chunk.byteLength;
+            if (size > maxArtifactBytes)
+              return Effect.fail(
+                new BoatApiError({
+                  status: 413,
+                  reason: "Boat recording exceeds the download size limit.",
+                }),
+              );
+            chunks.push(chunk);
+            return Effect.void;
+          }),
+          Effect.mapError((cause) => (isBoatApiError(cause) ? cause : invalidResponse(cause))),
+        );
+        if (size === 0)
+          return yield* new BoatApiError({
+            status: 502,
+            reason: "Boat recording download was empty.",
+          });
+        const result = new Uint8Array(size);
+        let offset = 0;
+        for (const chunk of chunks) {
+          result.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        return result;
+      },
+      Effect.timeout("5 minutes"),
+      Effect.catchTags({
+        TimeoutError: (detail) =>
+          Effect.fail(
+            new BoatApiError({ status: 408, reason: "Boat API request timed out.", detail }),
+          ),
+      }),
+      Effect.provide(clientLayer),
+    ),
     addSshKey: Effect.fn("BoatApiClient.addSshKey")(function* (id, publicKey) {
       const json = yield* request(
         HttpClientRequest.post(`${sandboxPath(id)}/sshkey`).pipe(

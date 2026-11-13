@@ -247,6 +247,15 @@ it.live(
         );
         expect(escaped.status).toBe(404);
       }
+      const backslashPath = new Request(
+        "http://controller.test/api/cloud-sandboxes/managed/test/proxy/api/auth/session",
+      );
+      // Fetch normalizes backslashes; native HTTP requests can still carry the raw path.
+      Object.defineProperty(backslashPath, "url", {
+        value: "http://controller.test/api/cloud-sandboxes/managed/test/proxy/api\\auth/session",
+      });
+      const backslash = yield* Effect.promise(() => web.handler(backslashPath, requestContext));
+      expect(backslash.status).toBe(404);
       expect(f.connections()).toBe(1);
       expect(requests).toHaveLength(2);
     }).pipe(

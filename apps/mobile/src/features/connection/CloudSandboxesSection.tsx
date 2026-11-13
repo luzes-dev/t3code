@@ -6,6 +6,7 @@ import {
   describeCloudSandbox,
   describeCloudSandboxProfile,
   describeManagedCloudSandboxIssue,
+  managedSandboxIssueRecovery,
   offersCloudSandboxControl,
   parseSandboxProfileLimits,
   type ManagedCloudSandboxIssueRollup,
@@ -101,7 +102,7 @@ function FollowerIssueBanner({ issue }: { readonly issue: ManagedCloudSandboxIss
     <View>
       <ListRowLayout
         label={describeManagedCloudSandboxIssue(issue)}
-        description={`${affected > 1 ? `${affected} follower sandboxes` : "1 follower sandbox"} affected since ${new Date(issue.firstSeenAt).toLocaleString()}. The fix belongs to the controller host's cloud profile: sign in again from a profile row above.`}
+        description={`${affected > 1 ? `${affected} follower sandboxes` : "1 follower sandbox"} affected since ${new Date(issue.firstSeenAt).toLocaleString()}. ${managedSandboxIssueRecovery(issue.cause)}`}
       />
     </View>
   );
@@ -125,10 +126,12 @@ function SandboxProfileRow({
   const [budget, setBudget] = useState("");
   const [concurrent, setConcurrent] = useState("");
   const [template, setTemplate] = useState("");
+  const [apiKey, setApiKey] = useState("");
   const [pending, setPending] = useState<"save" | "remove" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const startEditing = () => {
+    setApiKey("");
     setBudget(profile.monthlyBudgetUsd === null ? "" : String(profile.monthlyBudgetUsd));
     setConcurrent(String(profile.maxConcurrentSandboxes));
     setTemplate(profile.template ?? "");
@@ -157,14 +160,21 @@ function SandboxProfileRow({
         driverKind: profile.driverKind,
         defaultSize: profile.defaultSize,
         autoStopMinutes: profile.autoStopMinutes,
+        ...(apiKey.trim() === "" ? {} : { apiKey: apiKey.trim() }),
         ...limits.success,
       },
     });
     setPending(null);
     if (result._tag === "Failure") {
-      setError(cloudSandboxFailureMessage(result, "Could not save the sandbox profile."));
+      const message = cloudSandboxFailureMessage(result, "Could not save the sandbox profile.");
+      setError(
+        message !== null && apiKey.trim() !== ""
+          ? `${message} Check the replacement API key and connection, then try again.`
+          : message,
+      );
       return;
     }
+    setApiKey("");
     setEditing(false);
   };
 
@@ -202,6 +212,16 @@ function SandboxProfileRow({
       {editing ? (
         <View className="gap-3 px-4 pb-4">
           <ConnectionFormField
+            label="Replacement API key"
+            value={apiKey}
+            onChangeText={setApiKey}
+            placeholder="Leave blank to keep the saved key"
+            secureTextEntry
+            autoCapitalize="none"
+            autoCorrect={false}
+            editable={pending === null}
+          />
+          <ConnectionFormField
             label="Monthly budget"
             value={budget}
             onChangeText={setBudget}
@@ -231,7 +251,10 @@ function SandboxProfileRow({
               size="compact"
               tone="secondary"
               disabled={pending !== null}
-              onPress={() => setEditing(false)}
+              onPress={() => {
+                setApiKey("");
+                setEditing(false);
+              }}
             />
             <Button
               label={pending === "save" ? "Saving…" : "Save"}

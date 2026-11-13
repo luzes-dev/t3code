@@ -265,9 +265,9 @@ never starts a stopped sandbox by itself: you or an agent resumes it. Disconnect
 stops routing to it but does not stop its compute: it stays billed until the auto-stop window
 closes, and the sandboxes list says so. Stopping always stops the billable runtime.
 
-Once the budget is reached, new sandboxes are refused. The budget counts running and stopped
-sandboxes, plus the minimum window the new one would run. When the provider does not report a
-price for a machine, a configured budget refuses that machine rather than guessing it free. A
+The budget checks new starts, resumes, resizing, and manual lifetime extensions against recorded
+spend and reserved runtime. Running machines can still exceed the budget. When the provider does
+not report a price for a machine, a configured budget refuses that machine rather than guessing it free. A
 stopped sandbox's disk is deleted once its source thread is deleted, or at any time from the
 Cloud sandboxes section. Sandboxes never receive the boat.dev account's environment
 variables: a fresh machine starts clean, and a template snapshot supplies anything an agent

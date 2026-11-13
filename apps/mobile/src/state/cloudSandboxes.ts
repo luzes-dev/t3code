@@ -38,7 +38,7 @@ export const cloudSandboxOperation = createEnvironmentRpcCommand(connectionAtomR
 
 const managedSandboxes = createManagedSandboxAtoms(connectionAtomRuntime);
 export const managedSandboxesAtom = managedSandboxes.list;
-// Pickers read this owner-derived view; the full list stays for admin surfaces.
+// Owner-derived resources, separate from the controller administration list.
 export const selectableManagedSandboxesAtom = managedSandboxes.selectable;
 // Degraded followers, collapsed per cause: one warning naming one fix.
 export const managedSandboxIssuesAtom = managedSandboxes.issues;

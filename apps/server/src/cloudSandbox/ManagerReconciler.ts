@@ -1,13 +1,7 @@
 import * as Effect from "effect/Effect";
-import * as Option from "effect/Option";
 import type { ManagedCloudSandboxResourceId } from "@t3tools/contracts";
 import * as Store from "./CloudSandboxStore.ts";
-import {
-  isConnectIntent,
-  isDisconnectedButRunning,
-  toError,
-  type ManagerRuntime,
-} from "./ManagerRuntime.ts";
+import { isConnectIntent, toError, type ManagerRuntime } from "./ManagerRuntime.ts";
 import type { ManagerAllocation } from "./ManagerAllocation.ts";
 import type { ManagerConnections } from "./ManagerConnections.ts";
 
@@ -30,17 +24,25 @@ export const makeReconciler = (
   } = rt;
   const { connectRecord, connectUnlocked, recoverUnallocated } = connections;
   const { release } = allocation;
+  const observeSandbox = Effect.fn("CloudSandboxManager.observeSandbox")(function* (
+    record: Store.CloudSandboxRecord,
+  ) {
+    const driver = yield* driverFor(record);
+    return yield* driver.get(yield* requireSandbox(record)).pipe(
+      Effect.catchTags({
+        CloudSandboxError: (error) =>
+          error.reason === "not-found" ? Effect.succeed(null) : Effect.fail(error),
+      }),
+      Effect.mapError(toError),
+    );
+  });
   const checkRoute = Effect.fn("CloudSandboxManager.checkRoute")(function* (
     record: Store.CloudSandboxRecord,
   ) {
     const id = record.resourceId;
-    const sandboxId = yield* requireSandbox(record);
-    const status = yield* driverFor(record).pipe(
-      Effect.flatMap((driver) => driver.get(sandboxId).pipe(Effect.mapError(toError))),
-      Effect.option,
-    );
-    if (Option.isNone(status)) return;
-    if (status.value.state === "stopped") {
+    const status = yield* observeSandbox(record);
+    if (status === null) return true;
+    if (status.state === "stopped") {
       healthFailures.delete(id);
       yield* stopWorker(id);
       routes.delete(id);
@@ -48,7 +50,7 @@ export const makeReconciler = (
       yield* store.save({ ...record, power: "stopped" });
       return;
     }
-    if (status.value.state !== "ready") return;
+    if (status.state !== "ready") return;
     const connected = yield* transport.isConnected(id).pipe(Effect.orElseSucceed(() => false));
     if (connected) {
       healthFailures.delete(id);
@@ -70,11 +72,9 @@ export const makeReconciler = (
   const observePower = Effect.fn("CloudSandboxManager.observePower")(function* (
     record: Store.CloudSandboxRecord,
   ) {
-    const sandboxId = yield* requireSandbox(record);
-    const driver = yield* driverFor(record);
-    const status = yield* driver.get(sandboxId).pipe(Effect.option);
-    if (Option.isSome(status) && status.value.state === "stopped")
-      yield* store.save({ ...record, power: "stopped" });
+    const status = yield* observeSandbox(record);
+    if (status === null) return true;
+    if (status.state === "stopped") yield* store.save({ ...record, power: "stopped" });
   });
 
   const reconcileLocked = Effect.fn("CloudSandboxManager.reconcileLocked")(function* (
@@ -97,11 +97,10 @@ export const makeReconciler = (
       return false;
     }
     if (routes.has(id)) {
-      yield* checkRoute(record);
-      return false;
+      return (yield* checkRoute(record)) === true;
     }
+    if (record.lifecycle === "active" && (yield* observePower(record))) return true;
     if (isConnectIntent(record)) yield* connectUnlocked(id, false);
-    else if (isDisconnectedButRunning(record)) yield* observePower(record);
     return false;
   });
 
@@ -119,8 +118,7 @@ export const makeReconciler = (
           (record) =>
             record.lifecycle === "allocating" ||
             record.lifecycle === "deleting" ||
-            isConnectIntent(record) ||
-            isDisconnectedButRunning(record),
+            record.lifecycle === "active",
         ),
         (record) => reconcileOne(record.resourceId).pipe(Effect.ignore),
         // A fork holds its resource lock for minutes and must not stall the other sandboxes.
