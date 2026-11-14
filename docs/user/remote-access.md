@@ -235,6 +235,52 @@ again on its next connect.
 For Antigravity's Google callback on a remote host, see
 [remote sign-in](./providers-antigravity.md#sign-in-from-a-remote-device).
 
+## Cloud sandbox workspaces
+
+Run agents in a cloud sandbox from [boat.dev](https://boat.dev) instead of your own machine.
+
+To set it up, open **Settings → Environments → Add environment** and pick a provider under
+**Or use a cloud sandbox**. Paste your boat.dev API key, then choose:
+
+- the machine size and auto-stop window every sandbox starts with
+- an optional monthly budget
+- how many sandboxes can run at once
+- an optional template snapshot to start from
+
+The API key stays on the server you set up. Nothing is provisioned during setup. Agents create
+a sandbox when they need one. An agent that delegates a task to a sandbox gets a fresh sandbox
+for it, and an agent already working in a sandbox can hand its work off to a copy of that
+sandbox, uncommitted files included.
+
+If an agent's provider isn't available in a sandbox, use a template snapshot that has its CLI
+installed and signed in.
+
+Once a profile exists, **Settings → Environments** has a **Cloud sandboxes** section. Use it to
+change the limits, remove the profile, and stop, resume, open, or delete sandboxes. Removing a
+profile requires deleting its sandboxes first. On mobile the same controls are on each
+environment's settings page.
+
+Sandboxes stop on their own after the auto-stop window, unless agent work is active. T3 Code
+never starts a stopped sandbox by itself: you or an agent resumes it. Disconnecting a sandbox
+stops routing to it but does not stop its compute: it stays billed until the auto-stop window
+closes, and the sandboxes list says so. Stopping always stops the billable runtime.
+
+The budget checks new starts, resumes, resizing, and manual lifetime extensions against recorded
+spend and reserved runtime. Running machines can still exceed the budget. When the provider does
+not report a price for a machine, a configured budget refuses that machine rather than guessing it free. A
+stopped sandbox's disk is deleted once its source thread is deleted, or at any time from the
+Cloud sandboxes section. Sandboxes never receive the boat.dev account's environment
+variables: a fresh machine starts clean, and a template snapshot supplies anything an agent
+needs to sign in.
+
+Removing T3 Code, or the profile, never deletes VMs at the provider by itself. Before you
+remove a profile, delete its sandboxes in the Cloud sandboxes section. A sandbox left behind
+after uninstalling stops on its own after its auto-stop window, but its provider-side disk
+copy and snapshot keep costing storage until you remove them, so sweep the provider console
+when you leave.
+
+Running processes are not copied to a sandbox. Filesystem worktrees remain the default.
+
 ## Browser on a remote environment
 
 Browser tabs belong to the environment, so you and your agents see the same

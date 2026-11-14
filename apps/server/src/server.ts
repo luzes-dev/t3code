@@ -1,4 +1,13 @@
+import * as WorktreeMcpService from "./mcp/WorktreeMcpService.ts";
+import * as CloudSandboxController from "./workspace/CloudSandboxController.ts";
+import * as CloudSandboxProfiles from "./cloudSandbox/CloudSandboxProfiles.ts";
+import * as FollowerHostSettings from "./cloudSandbox/FollowerHostSettingsLedger.ts";
+import * as FollowerSettingsSync from "./cloudSandbox/FollowerSettingsSync.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
+import * as ManagedCloudSandboxRoutes from "./cloudSandbox/ManagedCloudSandboxRoutes.ts";
+import * as CloudSandboxPreview from "./cloudSandbox/CloudSandboxPreview.ts";
+import * as CloudSandboxManager from "./cloudSandbox/CloudSandboxManager.ts";
+import * as CloudSandboxWorkspaces from "./workspace/CloudSandboxWorkspaces.ts";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
 import * as Random from "effect/Random";
 import * as EnvironmentKeys from "./cloud/environmentKeys.ts";
@@ -18,6 +27,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { EnvironmentHttpApi, type RepositoryIdentity } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cause from "effect/Cause";
+import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -796,6 +806,22 @@ const layerCommandReadiness = HttpRouter.middleware(
   { global: true },
 );
 
+// Follower settings inheritance: the controller approves one inheritable
+// snapshot revision per host save; followers pull it over the existing source
+// channel. Both starts no-op where they do not apply.
+const layerFollowerSettings = Layer.mergeAll(
+  FollowerHostSettings.layer,
+  FollowerSettingsSync.layer.pipe(Layer.provide(CloudSandboxController.layer)),
+);
+const layerFollowerSettingsRuntime = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const ledger = yield* FollowerHostSettings.FollowerHostSettingsLedger;
+    yield* ledger.start;
+    const sync = yield* FollowerSettingsSync.FollowerSettingsSync;
+    yield* sync.start;
+  }),
+).pipe(Layer.provide(layerFollowerSettings));
+
 const layerMakeRoutes = Layer.mergeAll(
   Layer.mergeAll(
     HttpApiBuilder.layer(EnvironmentHttpApi).pipe(
@@ -811,6 +837,8 @@ const layerMakeRoutes = Layer.mergeAll(
       Layer.provide(AuthHttp.layerAuthenticatedAuth),
     ),
     ServerHttp.layerOtlpTracesProxyRoute,
+    ServerHttp.layerCloudSandboxActivityRoute,
+    ManagedCloudSandboxRoutes.layer,
     ServerHttp.layerAssetRoute,
     ServerHttp.layerAttachmentUploadRoute,
     GuestHttp.layer,
@@ -828,10 +856,41 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.effectDiscard(
     RemoteDelegation.RemoteDelegation.pipe(Effect.flatMap((remote) => remote.start())),
   ),
+  // Reclaims finished sandbox workspaces on a timer, like the delegation follower.
+  Layer.effectDiscard(
+    CloudSandboxWorkspaces.CloudSandboxWorkspaces.pipe(
+      Effect.flatMap((workspaces) => workspaces.start()),
+    ),
+  ),
 ).pipe(
   Layer.provide(
     PullRequestReviewGuideService.layer.pipe(Layer.provide(PullRequestReviewGuides.layer)),
   ),
+  Layer.provide(WorktreeMcpService.layer),
+  Layer.provide(
+    Layer.mergeAll(
+      CloudSandboxWorkspaces.layer,
+      // Follower settings inheritance: the controller approves one inheritable
+      // snapshot revision per host save; followers pull it over the existing
+      // source channel. Both starts no-op where they do not apply.
+      layerFollowerSettingsRuntime,
+    ).pipe(Layer.provide(CloudSandboxController.layer)),
+  ),
+  HttpRouter.provideRequest(
+    Layer.effectContext(
+      Effect.gen(function* () {
+        const manager = yield* CloudSandboxManager.CloudSandboxManager;
+        const profiles = yield* CloudSandboxProfiles.CloudSandboxProfiles;
+        const preview = yield* Layer.build(CloudSandboxPreview.layer);
+        return Context.make(CloudSandboxManager.CloudSandboxManager, manager).pipe(
+          Context.add(CloudSandboxProfiles.CloudSandboxProfiles, profiles),
+          Context.merge(preview),
+        );
+      }),
+    ),
+  ),
+  Layer.provide(CloudSandboxProfiles.layer),
+  Layer.provide(CloudSandboxManager.layer),
   // delegate_task to a linked environment, from /mcp and the follower above.
   Layer.provide(RemoteDelegation.layer.pipe(Layer.provide(ProjectionStoreV2.layer))),
   // Links agents ask for: shown in a thread from /mcp, answered over WebSocket.

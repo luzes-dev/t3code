@@ -50,6 +50,7 @@ import {
   OrchestrationSearchThreadsInput,
   OrchestrationSearchThreadsResult,
 } from "./threadSearch.ts";
+import { ManagedCloudSandboxIssue } from "./managedCloudSandbox.ts";
 import {
   OrchestrationGetFullThreadDiffInput,
   OrchestrationGetFullThreadDiffResult,
@@ -896,6 +897,12 @@ export const OrchestrationV2RemoteTaskChild = Schema.Struct({
    * one owed, so each reaches the thread there once however often it is sent.
    */
   stopCount: Schema.optional(NonNegativeInt),
+  /**
+   * Why the task's follower sandbox there is degraded, when its controller
+   * host says so. Absent means healthy; `delegated_task.remote.issue` sets it
+   * and clears it, overwriting on retry, so warnings never accumulate.
+   */
+  sandboxIssue: Schema.optional(ManagedCloudSandboxIssue),
 });
 export type OrchestrationV2RemoteTaskChild = typeof OrchestrationV2RemoteTaskChild.Type;
 
@@ -3635,6 +3642,20 @@ const OrchestrationV2InternalCommand = Schema.Union([
     commandId: CommandId,
     parentThreadId: ThreadId,
     taskId: NodeId,
+  }),
+  /**
+   * Surfaces a follower sandbox's degraded state on its task card here, or
+   * clears it when the controller host says the resource recovered. Server-
+   * internal; the issue is state, so an unchanged key records nothing. A task
+   * with its result keeps it and accepts nothing further.
+   */
+  Schema.Struct({
+    type: Schema.Literal("delegated_task.remote.issue"),
+    commandId: CommandId,
+    parentThreadId: ThreadId,
+    taskId: NodeId,
+    /** Absent clears the current issue. */
+    issue: Schema.optional(ManagedCloudSandboxIssue),
   }),
   Schema.Struct({
     type: Schema.Literal("checkpoint.rollback.fail"),

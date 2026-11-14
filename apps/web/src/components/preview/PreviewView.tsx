@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import { useCloudPreviewExternalAvailable } from "~/connection/cloudSandbox";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { settlePromise } from "@t3tools/client-runtime/state/runtime";
 import type { DesktopPreviewAnnotationVoiceConfig } from "@t3tools/contracts";
@@ -42,7 +43,13 @@ import {
   updatePreviewServerSnapshot,
   useThreadPreviewState,
 } from "~/previewStateStore";
-import { resolveDiscoveredServerUrl } from "~/browser/browserTargetResolver";
+import {
+  resolveExternalServerUrl,
+  resolveServerOwnedUrl,
+  acquireExternalServerUrl,
+  retainExternalServerUrl,
+  type ExternalServerUrlLease,
+} from "~/browser/browserTargetResolver";
 import { useEnvironmentSupportsServerBrowser } from "~/state/entities";
 import {
   useEnvironment,
@@ -255,17 +262,22 @@ export function PreviewView({
   );
 
   /** Resolves to the profile of the tab that loaded the URL, or null when nothing opened. */
-  const navigateToResolvedUrl = async (resolvedUrl: string) => {
+  const navigateToResolvedUrl = async (
+    resolvedUrl: string,
+    lease: ExternalServerUrlLease | null = null,
+  ) => {
     if (isServerTab && serverSurfaceRef.current) {
       if (serverInputDisabled) return null;
       serverSurfaceRef.current.navigate(resolvedUrl);
       rememberPreviewUrl(threadRef, resolvedUrl);
+      if (tabId) await retainExternalServerUrl(threadRef.environmentId, tabId, lease);
       return activeProfileId;
     }
     if (runtimeTabId && previewBridge) {
       await previewBridge.navigate(runtimeTabId, resolvedUrl);
       rememberPreviewUrl(threadRef, resolvedUrl);
       focusPreviewPage(runtimeTabId);
+      if (tabId) await retainExternalServerUrl(threadRef.environmentId, tabId, lease);
       return activeProfileId;
     }
     const result = await openPreviewSession({ openPreview: open, threadRef, url: resolvedUrl });
@@ -279,9 +291,23 @@ export function PreviewView({
         });
       }
     }
+    if (result._tag === "Success")
+      await retainExternalServerUrl(threadRef.environmentId, result.value.tabId, lease);
     return result._tag === "Success"
       ? (result.value.profileId ?? DEFAULT_BROWSER_PROFILE_ID)
       : null;
+  };
+
+  const navigateExternalUrl = async (rawUrl: string) => {
+    const lease = await acquireExternalServerUrl(threadRef.environmentId, rawUrl);
+    try {
+      const profile = await navigateToResolvedUrl(lease.url, lease);
+      if (profile === null) await lease.release();
+      return profile;
+    } catch (error) {
+      await lease.release();
+      throw error;
+    }
   };
 
   // Incognito visits stay out of the project's persisted history.
@@ -291,7 +317,11 @@ export function PreviewView({
   const handleSubmitUrl = async (next: string) => {
     try {
       const resolved = resolveAddressBarInput(next, resolveSearchUrlTemplate(getClientSettings()));
-      if (isHistoryProfile(await navigateToResolvedUrl(resolved))) {
+      const profile =
+        isServerTab || !previewBridge
+          ? await navigateToResolvedUrl(resolved)
+          : await navigateExternalUrl(resolved);
+      if (isHistoryProfile(profile)) {
         recordVisitForThread(threadRef, resolved);
       }
     } catch (error) {
@@ -309,11 +339,11 @@ export function PreviewView({
 
   const handleOpenServerUrl = async (next: string) => {
     try {
-      const resolved =
+      const profile =
         isServerTab || !previewBridge
-          ? normalizePreviewUrl(next)
-          : resolveDiscoveredServerUrl(threadRef.environmentId, next);
-      if (isHistoryProfile(await navigateToResolvedUrl(resolved))) {
+          ? await navigateToResolvedUrl(normalizePreviewUrl(next))
+          : await navigateExternalUrl(next);
+      if (isHistoryProfile(profile)) {
         recordVisitForThread(threadRef, next);
       }
     } catch (error) {
@@ -329,7 +359,19 @@ export function PreviewView({
     }
   };
 
-  const handleRefresh = () => {
+  const handleRefresh = async () => {
+    if (!isServerTab && url && resolveServerOwnedUrl(threadRef.environmentId, url) !== url) {
+      try {
+        await navigateExternalUrl(url);
+      } catch (error) {
+        toastManager.add({
+          type: "error",
+          title: "Unable to reconnect preview",
+          description: error instanceof Error ? error.message : "Preview access is unavailable.",
+        });
+      }
+      return;
+    }
     if (isServerTab) serverSurfaceRef.current?.reload();
     else if (previewBridge && runtimeTabId) void previewBridge.refresh(runtimeTabId);
   };
@@ -434,9 +476,20 @@ export function PreviewView({
     else if (previewBridge && runtimeTabId) void previewBridge.goForward(runtimeTabId);
   };
 
-  const handleOpenInBrowser = () => {
-    if (!localApi || !url) return;
-    void localApi.shell.openExternal(url).catch(() => undefined);
+  const externalAvailable = useCloudPreviewExternalAvailable(threadRef.environmentId);
+  const handleOpenInBrowser = async () => {
+    if (!localApi || !url || !externalAvailable) return;
+    try {
+      await localApi.shell.openExternal(
+        await resolveExternalServerUrl(threadRef.environmentId, url),
+      );
+    } catch (error) {
+      toastManager.add({
+        type: "error",
+        title: "Unable to open in browser",
+        description: error instanceof Error ? error.message : "Preview access is unavailable.",
+      });
+    }
   };
 
   const moveTarget = alternatePreviewRuntime(
@@ -448,34 +501,46 @@ export function PreviewView({
   const moveLabel =
     moveTarget === "server" ? `Open in ${environmentLabel}'s browser` : "Open on this computer";
   const handleMoveTab = async () => {
-    if (!moveTarget || !tabId || !snapshot) return;
-    const result = await openPreviewSession({
-      openPreview: open,
-      threadRef,
-      ...(url
-        ? {
-            url:
-              moveTarget === "desktop"
-                ? resolveDiscoveredServerUrl(threadRef.environmentId, url)
-                : url,
-          }
-        : {}),
-      viewport,
-      ...(snapshot.profileId === undefined ? {} : { profileId: snapshot.profileId }),
-      runtime: moveTarget,
-    });
-    if (result._tag === "Failure") {
-      if (isAtomCommandInterrupted(result)) return;
-      const error = squashAtomCommandFailure(result);
+    if (!moveTarget || !tabId || !snapshot || (moveTarget === "desktop" && !externalAvailable))
+      return;
+    let lease: ExternalServerUrlLease | null = null;
+    try {
+      if (url && moveTarget === "desktop")
+        lease = await acquireExternalServerUrl(threadRef.environmentId, url);
+      const result = await openPreviewSession({
+        openPreview: open,
+        threadRef,
+        ...(url
+          ? {
+              url: lease?.url ?? resolveServerOwnedUrl(threadRef.environmentId, url),
+            }
+          : {}),
+        viewport,
+        ...(snapshot.profileId === undefined ? {} : { profileId: snapshot.profileId }),
+        runtime: moveTarget,
+      });
+      if (result._tag === "Failure") {
+        await lease?.release();
+        if (isAtomCommandInterrupted(result)) return;
+        const error = squashAtomCommandFailure(result);
+        toastManager.add({
+          type: "error",
+          title: "Unable to move the browser tab",
+          description: error instanceof Error ? error.message : "An error occurred.",
+        });
+        return;
+      }
+      await retainExternalServerUrl(threadRef.environmentId, result.value.tabId, lease);
+      useRightPanelStore.getState().openBrowser(threadRef, result.value.tabId);
+      await closePreviewSession({ closePreview, snapshot, tabId, threadRef });
+    } catch (error) {
+      await lease?.release();
       toastManager.add({
         type: "error",
         title: "Unable to move the browser tab",
-        description: error instanceof Error ? error.message : "An error occurred.",
+        description: error instanceof Error ? error.message : "Preview access is unavailable.",
       });
-      return;
     }
-    useRightPanelStore.getState().openBrowser(threadRef, result.value.tabId);
-    await closePreviewSession({ closePreview, snapshot, tabId, threadRef });
   };
 
   const handlePictureInPicture = () => {
@@ -982,7 +1047,7 @@ export function PreviewView({
         onForward={handleForward}
         onRefresh={handleRefresh}
         onSubmit={(next) => void handleSubmitUrl(next)}
-        onOpenInBrowser={tabId ? handleOpenInBrowser : undefined}
+        onOpenInBrowser={tabId && externalAvailable ? handleOpenInBrowser : undefined}
         onCapture={previewBridge && tabId && !isServerTab ? handleCapture : undefined}
         captureDisabled={!desktopOverlay || isUnreachable}
         recording={recordingRuntimeTabId !== null}
@@ -1018,7 +1083,9 @@ export function PreviewView({
               }
               actions={moreMenuActions}
               {...(moveTarget
-                ? { move: { label: moveLabel, onMove: () => void handleMoveTab() } }
+                ? moveTarget === "desktop" && !externalAvailable
+                  ? {}
+                  : { move: { label: moveLabel, onMove: () => void handleMoveTab() } }
                 : {})}
               profileName={activeProfileName}
               findShortcutLabel={shortcutLabelForCommand(keybindings, "preview.find", {

@@ -70,6 +70,7 @@ export interface SettingsSearchItem {
   readonly wslAvailableOnly?: boolean;
   readonly managedTunnelOnly?: boolean;
   readonly peerLinksOnly?: boolean;
+  readonly cloudSandboxesOnly?: boolean;
   readonly fastWorktreeCheckoutOnly?: boolean;
   readonly textGeneratorsOnly?: boolean;
   readonly secondary?: boolean;
@@ -86,6 +87,7 @@ export interface SettingsSearchAvailability {
   readonly hasThreadAutoSettlement: boolean;
   readonly managedTunnelActive?: boolean;
   readonly hasPeerLinkHost?: boolean;
+  readonly hasCloudSandboxProfile?: boolean;
   readonly hasFastWorktreeCheckoutEnvironment?: boolean;
   /** An environment without a provider allow-list, which hides text generators. */
   readonly hasTextGeneratorsEnvironment?: boolean;
@@ -1318,6 +1320,16 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["link peer another machine vps agents work there handoff pairing code"],
   },
   {
+    id: "cloud-sandboxes",
+    cloudSandboxesOnly: true,
+    title: "Cloud sandboxes",
+    to: "/settings/connections",
+    targetId: "cloud-sandboxes",
+    searchTerms: [
+      "boat sandbox profile budget monthly spend concurrent template snapshot stop resume delete open",
+    ],
+  },
+  {
     id: "remote-environments",
     title: "Environments",
     to: "/settings/connections",
@@ -1514,6 +1526,7 @@ export function filterAvailableSettingsSearchItems(
       (!item.requiresThreadAutoSettlement || availability.hasThreadAutoSettlement) &&
       (!item.managedTunnelOnly || availability.managedTunnelActive === true) &&
       (!item.peerLinksOnly || availability.hasPeerLinkHost === true) &&
+      (!item.cloudSandboxesOnly || availability.hasCloudSandboxProfile === true) &&
       (!item.fastWorktreeCheckoutOnly ||
         availability.hasFastWorktreeCheckoutEnvironment === true) &&
       (!item.textGeneratorsOnly || availability.hasTextGeneratorsEnvironment === true),

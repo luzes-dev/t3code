@@ -6,6 +6,10 @@ import type {
   ScopedThreadRef,
 } from "@t3tools/contracts";
 
+import {
+  releasePreviewExternalServerUrl,
+  resolveServerOwnedUrl,
+} from "~/browser/browserTargetResolver";
 import { useClosedViewStore } from "~/closedViewStore";
 import { beginPreviewSessionClose, cancelPreviewSessionClose } from "~/previewStateStore";
 
@@ -29,12 +33,25 @@ export async function closePreviewSession<E>(
   });
   if (result._tag === "Failure") {
     cancelPreviewSessionClose(input.threadRef, input.snapshot, input.tabId);
-  } else if (input.snapshot) {
-    useClosedViewStore.getState().remember({
-      kind: "browser",
-      threadRef: input.threadRef,
-      snapshot: input.snapshot,
-    });
+  } else {
+    const snapshot = input.snapshot;
+    const restorable =
+      snapshot === null || snapshot.navStatus._tag === "Idle"
+        ? snapshot
+        : {
+            ...snapshot,
+            navStatus: {
+              ...snapshot.navStatus,
+              url: resolveServerOwnedUrl(input.threadRef.environmentId, snapshot.navStatus.url),
+            },
+          };
+    await releasePreviewExternalServerUrl(input.threadRef.environmentId, input.tabId);
+    if (restorable)
+      useClosedViewStore.getState().remember({
+        kind: "browser",
+        threadRef: input.threadRef,
+        snapshot: restorable,
+      });
   }
   return result;
 }

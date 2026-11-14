@@ -1,5 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import { threadKey } from "@t3tools/client-runtime/state/entities";
+import { describeManagedCloudSandboxIssue } from "@t3tools/client-runtime/state/cloudSandbox";
 import { ThreadDetailsControl } from "./ThreadDetailsControl";
 import { ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
@@ -309,19 +310,32 @@ function RemoteSubagentRow(props: {
             </span>
           </span>
           <span
-            className={`flex max-w-1/2 shrink-0 gap-1 text-2xs ${failed ? "text-destructive" : "text-muted-foreground"}`}
+            className={`flex max-w-1/2 shrink-0 gap-1 text-2xs ${
+              remoteChild.sandboxIssue !== undefined
+                ? "text-warning"
+                : failed
+                  ? "text-destructive"
+                  : "text-muted-foreground"
+            }`}
           >
             <span className="truncate">on {remoteChild.label}</span>
-            <span className="shrink-0">· {threadRelationshipStatusLabel(status)}</span>
+            <span className="shrink-0">
+              ·{" "}
+              {remoteChild.sandboxIssue !== undefined
+                ? "issue"
+                : threadRelationshipStatusLabel(status)}
+            </span>
           </span>
         </TooltipTrigger>
         <TooltipPopup side="left">
           <LineageTooltipContent
             title={title}
             hint={
-              environment === null
-                ? `Runs on ${remoteChild.label}. Connect to it to open the thread there.`
-                : `Open on ${remoteChild.label}`
+              remoteChild.sandboxIssue !== undefined
+                ? `${environment === null ? `Runs on ${remoteChild.label}. Connect to it to open the thread there.` : `Open on ${remoteChild.label}`} ${describeManagedCloudSandboxIssue(remoteChild.sandboxIssue)}`
+                : environment === null
+                  ? `Runs on ${remoteChild.label}. Connect to it to open the thread there.`
+                  : `Open on ${remoteChild.label}`
             }
           />
         </TooltipPopup>

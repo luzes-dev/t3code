@@ -1,0 +1,415 @@
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import { cloudSandboxCapabilities } from "@t3tools/cloud-sandbox";
+import {
+  MANAGED_CLOUD_SOURCE_PORT,
+  ManagedSandboxOwner,
+  retentionForOwner,
+  type EnvironmentId,
+  type ManagedCloudSandboxControlOperation,
+  type ManagedCloudSandboxControlResult,
+  type ManagedCloudSandboxResourceId,
+  type ManagedCloudSandboxSourceOperation,
+  type ManagedCloudSandboxSourceResult,
+  type ManagedSandboxFollowerOwner,
+  type ManagedSandboxRetention,
+} from "@t3tools/contracts";
+import * as Store from "./CloudSandboxStore.ts";
+import * as FollowerHostSettings from "./FollowerHostSettingsLedger.ts";
+import {
+  isDeletedOrDeleting,
+  toError,
+  stampBindIssue,
+  withoutIssue,
+  type ManagerRuntime,
+} from "./ManagerRuntime.ts";
+import type { ManagerAllocation } from "./ManagerAllocation.ts";
+import type { ManagerConnections } from "./ManagerConnections.ts";
+import type { ManagerReservations } from "./ManagerReservations.ts";
+
+const toManagerLedgerError = (cause: FollowerHostSettings.FollowerHostSettingsLedgerError) =>
+  new Store.CloudSandboxManagerError({
+    reason: cause.reason === "storage" ? "storage" : "ledger",
+    cause,
+  });
+
+export const makeControl = (
+  rt: ManagerRuntime,
+  connections: ManagerConnections,
+  allocation: ManagerAllocation,
+  reservations: ManagerReservations,
+  followerHostSettings: FollowerHostSettings.FollowerHostSettingsLedger["Service"] | undefined,
+) => {
+  const {
+    store,
+    locks,
+    transport,
+    publicResource,
+    requireRecord,
+    requireSandbox,
+    driverFor,
+    resolveProfile,
+  } = rt;
+  const { sourceContext, connectUnlocked, disconnectUnlocked } = connections;
+  const { fork, release } = allocation;
+  const { reserveResume, reserveAllocation, extend } = reservations;
+  const ownerEquivalence = Schema.toEquivalence(ManagedSandboxOwner);
+  /** Stamps ownership onto an unbound or identically-owned record. The host id
+   * is always derived by the controller; callers never assert it. */
+  const bindOwnerLocked = Effect.fn("CloudSandboxManager.bindOwnerLocked")(
+    function* (
+      id: ManagedCloudSandboxResourceId,
+      owner: ManagedSandboxFollowerOwner,
+      hostEnvironmentId: EnvironmentId,
+      retention?: ManagedSandboxRetention | undefined,
+    ) {
+      const record = yield* requireRecord(id);
+      if (isDeletedOrDeleting(record))
+        return yield* new Store.CloudSandboxManagerError({ reason: "conflict" });
+      // The host identity comes from the record's controller, not the caller.
+      const canonical: ManagedSandboxOwner =
+        owner._tag === "thread"
+          ? { _tag: "thread", hostEnvironmentId, threadId: owner.threadId }
+          : {
+              _tag: "task",
+              hostEnvironmentId,
+              sourceThreadId: owner.sourceThreadId,
+              taskId: owner.taskId,
+            };
+      // Rebinding to a different owner is refused: one task cannot take over
+      // another's sandbox, and a retry with the same owner stays idempotent.
+      const assignsOwnedTask =
+        record.owner._tag === "thread" &&
+        canonical._tag === "task" &&
+        record.owner.hostEnvironmentId === canonical.hostEnvironmentId &&
+        record.owner.threadId === canonical.sourceThreadId;
+      if (
+        record.owner._tag !== "user" &&
+        !assignsOwnedTask &&
+        !ownerEquivalence(record.owner, canonical)
+      )
+        return yield* new Store.CloudSandboxManagerError({ reason: "ownership" });
+      const next: Store.CloudSandboxRecord = {
+        ...record,
+        owner: canonical,
+        retention:
+          retention ??
+          (record.owner._tag === "user" ? retentionForOwner(canonical) : record.retention),
+      };
+      const bound = next.issue?.cause === "bind" ? withoutIssue(next) : next;
+      yield* store.save(bound);
+      return publicResource(bound);
+    },
+    (effect, id) => effect.pipe(Effect.tapError((error) => stampBindIssue(store, id, error))),
+  );
+  const executeUnlocked = Effect.fn("CloudSandboxManager.execute")(function* (
+    id: ManagedCloudSandboxResourceId,
+    operation: ManagedCloudSandboxControlOperation,
+  ): Effect.fn.Return<ManagedCloudSandboxControlResult, Store.CloudSandboxManagerError> {
+    const record = yield* requireRecord(id);
+    if (isDeletedOrDeleting(record))
+      return yield* new Store.CloudSandboxManagerError({ reason: "conflict" });
+    const sandboxId = yield* requireSandbox(record);
+    const driver = yield* driverFor(record);
+    const unsupported = () => new Store.CloudSandboxManagerError({ reason: "provider" });
+    switch (operation._tag) {
+      case "get":
+        return {
+          _tag: "status",
+          sandbox: yield* driver.get(sandboxId).pipe(Effect.mapError(toError)),
+          capabilities: cloudSandboxCapabilities(driver),
+        };
+      case "stop": {
+        if (driver.recording)
+          for (const recordingId of record.recordingIds)
+            yield* driver.recording
+              .stop(sandboxId, recordingId)
+              .pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logWarning(
+                    "Cloud recording finalization failed; stopping sandbox.",
+                    cause,
+                  ),
+                ),
+              );
+        yield* disconnectUnlocked(id);
+        const sandbox = yield* driver.stop(sandboxId).pipe(Effect.mapError(toError));
+        yield* store.save({
+          ...record,
+          intent: "disconnected",
+          power: sandbox.state === "stopped" ? "stopped" : "running",
+        });
+        return { _tag: "status", sandbox, capabilities: cloudSandboxCapabilities(driver) };
+      }
+      case "resume": {
+        yield* disconnectUnlocked(id);
+        yield* reserveResume(record);
+        const status = yield* driver.get(sandboxId).pipe(Effect.mapError(toError));
+        if (status.state === "stopped")
+          yield* driver.resume(sandboxId).pipe(Effect.mapError(toError));
+        yield* store.save({ ...(yield* requireRecord(id)), power: "running", intent: "connected" });
+        yield* connectUnlocked(id, true);
+        return {
+          _tag: "status",
+          sandbox: yield* driver.get(sandboxId).pipe(Effect.mapError(toError)),
+          capabilities: cloudSandboxCapabilities(driver),
+        };
+      }
+      case "desktop":
+        if (!driver.streaming) return yield* unsupported();
+        return {
+          _tag: "desktop",
+          session: yield* (
+            operation.viewMode === "browser"
+              ? driver.streaming.getBrowserStreamSession
+                ? driver.streaming.getBrowserStreamSession(sandboxId)
+                : Effect.fail(unsupported())
+              : driver.streaming.getDesktopStreamSession(sandboxId)
+          ).pipe(Effect.mapError(toError)),
+        };
+      case "extend":
+        return {
+          _tag: "status",
+          sandbox: yield* extend(id, operation.hours),
+          capabilities: cloudSandboxCapabilities(driver),
+        };
+      case "host":
+        if (
+          !Number.isInteger(operation.port) ||
+          operation.port < 1 ||
+          operation.port > 65_535 ||
+          operation.port === MANAGED_CLOUD_SOURCE_PORT
+        )
+          return yield* new Store.CloudSandboxManagerError({ reason: "ownership" });
+        if (!driver.hosting) return yield* unsupported();
+        if (!operation.isPublic && !driver.hosting.protectedAccess) return yield* unsupported();
+        return {
+          _tag: "host",
+          port: yield* driver.hosting
+            .exposePort(sandboxId, operation.port, operation.isPublic)
+            .pipe(Effect.mapError(toError)),
+        };
+      case "usage":
+        if (!driver.usage) return yield* unsupported();
+        return {
+          _tag: "usage",
+          usage: yield* driver.usage.getUsage(sandboxId).pipe(Effect.mapError(toError)),
+        };
+      case "recordingStart":
+        if (!driver.recording) return yield* unsupported();
+        yield* store.save({
+          ...record,
+          recordingIds: [...new Set([...record.recordingIds, operation.recordingId])],
+        });
+        return {
+          _tag: "recording",
+          recording: yield* driver.recording
+            .start(sandboxId, operation.recordingId)
+            .pipe(Effect.mapError(toError)),
+        };
+      case "recordingStatus":
+        if (!record.recordingIds.includes(operation.recordingId))
+          return yield* new Store.CloudSandboxManagerError({ reason: "ownership" });
+        if (!driver.recording) return yield* unsupported();
+        return {
+          _tag: "recording",
+          recording: yield* driver.recording
+            .status(sandboxId, operation.recordingId)
+            .pipe(Effect.mapError(toError)),
+        };
+      case "recordingStop":
+        if (!record.recordingIds.includes(operation.recordingId))
+          return yield* new Store.CloudSandboxManagerError({ reason: "ownership" });
+        if (!driver.recording) return yield* unsupported();
+        return {
+          _tag: "recording",
+          recording: yield* driver.recording
+            .stop(sandboxId, operation.recordingId)
+            .pipe(Effect.mapError(toError)),
+        };
+      case "resize": {
+        if (!driver.resizing) return yield* unsupported();
+        const { profile } = yield* resolveProfile(record.profileId);
+        const resized = {
+          ...record,
+          power: "running",
+        } satisfies Store.CloudSandboxRecord;
+        yield* reserveAllocation(
+          profile,
+          operation.size,
+          Math.max(record.selection.autoStopMinutes, record.reservation?.autoStopMinutes ?? 0),
+          resized,
+        );
+        yield* disconnectUnlocked(id);
+        const sandbox = yield* driver.resizing.resize(sandboxId, operation.size).pipe(
+          Effect.tapError(() =>
+            driver.get(sandboxId).pipe(
+              Effect.flatMap((observed) =>
+                Effect.gen(function* () {
+                  const current = yield* requireRecord(id);
+                  yield* store.save({
+                    ...current,
+                    selection: {
+                      ...current.selection,
+                      size: observed.size ?? current.selection.size,
+                    },
+                    reservation: {
+                      size: observed.size ?? current.reservation?.size ?? current.selection.size,
+                      autoStopMinutes:
+                        current.reservation?.autoStopMinutes ?? current.selection.autoStopMinutes,
+                    },
+                    power: observed.state === "stopped" ? "stopped" : "running",
+                  });
+                }),
+              ),
+              Effect.ignore,
+            ),
+          ),
+          Effect.mapError(toError),
+        );
+        const current = yield* requireRecord(id);
+        yield* store.save({
+          ...current,
+          selection: { ...current.selection, size: sandbox.size ?? operation.size },
+          reservation: {
+            size: sandbox.size ?? operation.size,
+            autoStopMinutes:
+              current.reservation?.autoStopMinutes ?? current.selection.autoStopMinutes,
+          },
+          power: sandbox.state === "stopped" ? "stopped" : "running",
+        });
+        yield* connectUnlocked(id, false);
+        return {
+          _tag: "status",
+          sandbox,
+          capabilities: cloudSandboxCapabilities(driver),
+        };
+      }
+    }
+  });
+
+  const execute = Effect.fn("CloudSandboxManager.executeLocked")(
+    (id: ManagedCloudSandboxResourceId, operation: ManagedCloudSandboxControlOperation) =>
+      locks.withLock(id, executeUnlocked(id, operation)),
+  );
+
+  const artifact = Effect.fn("CloudSandboxManager.artifact")(function* (
+    id: ManagedCloudSandboxResourceId,
+    recordingId: string,
+  ) {
+    const record = yield* requireRecord(id);
+    if (!record.recordingIds.includes(recordingId))
+      return yield* new Store.CloudSandboxManagerError({ reason: "ownership" });
+    const driver = yield* driverFor(record);
+    if (!driver.recording) return yield* new Store.CloudSandboxManagerError({ reason: "provider" });
+    return yield* driver.recording
+      .getArtifact(yield* requireSandbox(record), recordingId)
+      .pipe(Effect.mapError(toError));
+  });
+
+  const executeSource = Effect.fn("CloudSandboxManager.executeSource")(function* (
+    id: ManagedCloudSandboxResourceId,
+    token: string,
+    operation: ManagedCloudSandboxSourceOperation,
+  ): Effect.fn.Return<ManagedCloudSandboxSourceResult, Store.CloudSandboxManagerError> {
+    yield* sourceContext(id, token);
+    const requireOwnedChild = Effect.fn("CloudSandboxManager.requireOwnedChild")(function* (
+      childId: ManagedCloudSandboxResourceId,
+    ) {
+      const child = yield* requireRecord(childId);
+      if (child.parentResourceId !== id)
+        return yield* new Store.CloudSandboxManagerError({ reason: "ownership" });
+      return child;
+    });
+    switch (operation._tag) {
+      case "get":
+        return {
+          _tag: "resource",
+          resource: publicResource(
+            yield* operation.resourceId === undefined
+              ? requireRecord(id)
+              : requireOwnedChild(operation.resourceId),
+          ),
+        };
+      case "status":
+        yield* requireOwnedChild(operation.resourceId);
+        return { _tag: "result", result: yield* execute(operation.resourceId, { _tag: "get" }) };
+      case "host":
+        return {
+          _tag: "result",
+          result: yield* execute(id, { _tag: "host", port: operation.port, isPublic: false }),
+        };
+      case "fork": {
+        const source = yield* requireRecord(id);
+        if (source.environmentId === null)
+          return yield* new Store.CloudSandboxManagerError({ reason: "ownership" });
+        const created = yield* fork(
+          { ...operation, sourceResourceId: id },
+          { inheritOwner: false, hostEnvironmentId: source.environmentId },
+        );
+        return {
+          _tag: "connection",
+          connection: created.connection,
+          pairingToken: yield* transport.pairingToken(created.connection.resourceId),
+        };
+      }
+      case "connect": {
+        yield* requireOwnedChild(operation.resourceId);
+        // One critical section, so a concurrent stop or delete can't be overwritten by the reservation.
+        const connected = yield* locks.withLock(
+          operation.resourceId,
+          Effect.gen(function* () {
+            yield* reserveResume(yield* requireRecord(operation.resourceId));
+            return yield* connectUnlocked(operation.resourceId, true);
+          }),
+        );
+        return {
+          _tag: "connection",
+          connection: connected.connection,
+          pairingToken: yield* transport.pairingToken(operation.resourceId),
+        };
+      }
+      case "delete":
+        yield* requireOwnedChild(operation.resourceId);
+        yield* release(operation.resourceId);
+        return { _tag: "deleted" };
+      case "hostSettings": {
+        if (followerHostSettings === undefined)
+          return yield* new Store.CloudSandboxManagerError({
+            reason: "ledger",
+            cause: new Error("This controller has no follower settings ledger."),
+          });
+        return {
+          _tag: "hostSettings",
+          snapshot: yield* followerHostSettings.current.pipe(Effect.mapError(toManagerLedgerError)),
+        };
+      }
+      case "bindOwner": {
+        // A child may bind only its own fork, and only to an owner hosted on
+        // this controller derived from the authenticating resource's identity:
+        // the host id arrives from the record, never the child.
+        const auth = yield* requireRecord(id);
+        if (auth.environmentId === null)
+          return yield* new Store.CloudSandboxManagerError({ reason: "ownership" });
+        yield* requireOwnedChild(operation.resourceId);
+        const bound = yield* locks.withLock(
+          operation.resourceId,
+          bindOwnerLocked(
+            operation.resourceId,
+            operation.owner,
+            auth.environmentId,
+            operation.retention,
+          ),
+        );
+        return { _tag: "resource", resource: bound };
+      }
+    }
+  });
+
+  return {
+    execute,
+    artifact,
+    executeSource,
+    bindOwnerLocked,
+  };
+};

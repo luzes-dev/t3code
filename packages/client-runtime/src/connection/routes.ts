@@ -21,7 +21,8 @@ export type ConnectionRouteKind =
   | "tailnet"
   | "vpn"
   | "public"
-  | "ssh";
+  | "ssh"
+  | "cloud-sandbox";
 
 export const RELAY_ROUTE_ID = "relay";
 
@@ -33,6 +34,7 @@ export function connectionRouteId(target: ConnectionTarget): string {
       return RELAY_ROUTE_ID;
     case "BearerConnectionTarget":
     case "SshConnectionTarget":
+    case "CloudSandboxConnectionTarget":
       return target.connectionId;
   }
 }
@@ -94,6 +96,8 @@ export function connectionRouteKind(route: ConnectionRoute): ConnectionRouteKind
       return "relay";
     case "SshConnectionTarget":
       return "ssh";
+    case "CloudSandboxConnectionTarget":
+      return "cloud-sandbox";
     case "PrimaryConnectionTarget":
     case "BearerConnectionTarget": {
       const hostname = routeHostname(route);
@@ -134,6 +138,7 @@ const ROUTE_KIND_RANK: Record<ConnectionRouteKind, number> = {
   tailnet: 2,
   vpn: 2,
   public: 3,
+  "cloud-sandbox": 4,
   ssh: 4,
   relay: 5,
 };
@@ -181,6 +186,8 @@ function routeAddressKey(route: ConnectionRoute): string | null {
       return `bearer:${profile.httpBaseUrl.replace(/\/+$/, "")}`;
     case "SshConnectionProfile":
       return `ssh:${sshTargetKey(profile.target)}`;
+    case "CloudSandboxConnectionProfile":
+      return `cloud-sandbox:${profile.driverKind}:${profile.sandboxId}`;
     default:
       return null;
   }
@@ -204,6 +211,12 @@ export function connectionRouteLabel(route: ConnectionRoute): string {
         ? `SSH ${profile.target.username ? `${profile.target.username}@` : ""}${profile.target.hostname}`
         : "SSH";
     }
+    case "cloud-sandbox": {
+      const profile = Option.getOrNull(route.profile);
+      return profile?._tag === "CloudSandboxConnectionProfile"
+        ? `${profile.driverKind === "boat" ? "Boat" : "Sandbox"} ${profile.label}`
+        : "Sandbox";
+    }
     case "public":
       return routeHostname(route) ?? "Remote link";
   }
@@ -213,6 +226,10 @@ export function connectionRouteAddress(route: ConnectionRoute): string | null {
   if (route.target._tag === "SshConnectionTarget") {
     const profile = Option.getOrNull(route.profile);
     return profile?._tag === "SshConnectionProfile" ? profile.target.alias : null;
+  }
+  if (route.target._tag === "CloudSandboxConnectionTarget") {
+    const profile = Option.getOrNull(route.profile);
+    return profile?._tag === "CloudSandboxConnectionProfile" ? profile.sandboxId : null;
   }
   return routeHttpBaseUrl(route);
 }

@@ -1,3 +1,4 @@
+import { CloudSandboxStatusBar } from "./desktop/CloudSandboxStatusBar";
 import { ChildThreadApprovals } from "./chat/ChildThreadApprovals";
 import { workspaceAreaProps } from "../lib/workspaceFocus";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
@@ -3366,6 +3367,7 @@ export default function ChatView(props: ChatViewProps) {
           </header>
         )}
 
+        <CloudSandboxStatusBar environmentId={activeThread.environmentId} />
         <div className="relative flex min-h-0 min-w-0 flex-1">
           <ThreadFindCanvas
             findOptions={{
@@ -4012,6 +4014,7 @@ export default function ChatView(props: ChatViewProps) {
           onAddPullRequest={addPullRequestSurfaceStable}
           onAddPullRequests={addPullRequestsSurfaceStable}
           onAddDevice={addDeviceSurfaceStable}
+          onAddCloudDesktop={() => useRightPanelStore.getState().openCloudDesktop(routeThreadRef)}
           onAddSideChat={sideChatsOffered ? openSideChatStable : undefined}
           browserAvailable={canOperatePreview && browserAvailable}
           terminalAvailable={activeProject !== null && canOperateTerminal}

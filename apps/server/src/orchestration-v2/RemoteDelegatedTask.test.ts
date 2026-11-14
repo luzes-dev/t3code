@@ -11,6 +11,7 @@ import {
   ProviderThreadId,
   RunId,
   ThreadId,
+  type ManagedCloudSandboxIssue,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -417,6 +418,117 @@ it.layer(layerTest)("a delegated task in a linked environment", (it) => {
       const offered = yield* Ref.get(offers);
       assert.equal(offered.length, 1);
       assert.equal(offered[0]?.threadId, parent.threadId);
+    }),
+  );
+
+  it.effect("surfaces and clears a degraded follower sandbox on its card", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const parent = yield* seedLiveParent("issues");
+      const recorded = yield* orchestrator.dispatch({
+        type: "delegated_task.remote.request",
+        commandId: CommandId.make("command:remote-delegate:issues"),
+        parentThreadId: parent.threadId,
+        parentRunId: parent.runId,
+        parentNodeId: parent.rootNodeId,
+        task: "Run the suite there.",
+        driver: ProviderDriverKind.make("remote"),
+        modelSelection,
+        remoteChild,
+      });
+      const taskEvent = recorded.storedEvents.find(
+        (stored) => stored.event.type === "subagent.updated",
+      );
+      const taskId =
+        taskEvent?.event.type === "subagent.updated" ? taskEvent.event.payload.id : undefined;
+      assert.isDefined(taskId);
+      const issue = (message: string): ManagedCloudSandboxIssue => ({
+        cause: "connectivity",
+        driverKind: "boat",
+        profileId: "boat-main",
+        message,
+        firstSeenAt: "2026-02-09T10:00:00Z",
+      });
+      const report = (message: string, clear = false) =>
+        orchestrator.dispatch({
+          type: "delegated_task.remote.issue" as const,
+          commandId: CommandId.make(`command:remote-issue:${clear ? "clear" : message}`),
+          parentThreadId: parent.threadId,
+          taskId: taskId!,
+          ...(clear ? {} : { issue: issue(message) }),
+        });
+      yield* report("Lost the route.");
+      const projection = yield* orchestrator.getThreadProjection(parent.threadId);
+      const task = projection.subagents.find((candidate) => candidate.id === taskId);
+      assert.equal(task?.remoteChild?.sandboxIssue?.message, "Lost the route.");
+      // An unchanged cause records nothing: the dispatcher refuses the repeat,
+      // and the first message and firstSeenAt stand.
+      const repeated = yield* report("Returned late.").pipe(Effect.flip);
+      assert.equal(repeated._tag, "OrchestratorDispatchError");
+      const after = yield* orchestrator.getThreadProjection(parent.threadId);
+      const afterTask = after.subagents.find((candidate) => candidate.id === taskId);
+      assert.equal(afterTask?.remoteChild?.sandboxIssue?.message, "Lost the route.");
+      assert.equal(afterTask?.remoteChild?.sandboxIssue?.firstSeenAt, "2026-02-09T10:00:00Z");
+      // Recovery clears it.
+      yield* report("", true);
+      const recovered = yield* orchestrator.getThreadProjection(parent.threadId);
+      const recoveredTask = recovered.subagents.find((candidate) => candidate.id === taskId);
+      assert.equal(recoveredTask?.remoteChild?.sandboxIssue, undefined);
+      assert.equal(recoveredTask?.status, "running");
+    }),
+  );
+
+  it.effect("a card whose task already has its result accepts no issue", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const parent = yield* seedLiveParent("issue-after-result");
+      const recorded = yield* orchestrator.dispatch({
+        type: "delegated_task.remote.request",
+        commandId: CommandId.make("command:remote-delegate:issue-after-result"),
+        parentThreadId: parent.threadId,
+        parentRunId: parent.runId,
+        parentNodeId: parent.rootNodeId,
+        task: "Run a check.",
+        driver: ProviderDriverKind.make("remote"),
+        modelSelection,
+        remoteChild,
+      });
+      const taskEvent = recorded.storedEvents.find(
+        (stored) => stored.event.type === "subagent.updated",
+      );
+      const taskId =
+        taskEvent?.event.type === "subagent.updated" ? taskEvent.event.payload.id : undefined;
+      assert.isDefined(taskId);
+      yield* orchestrator.dispatch({
+        type: "delegated_task.remote.complete",
+        commandId: CommandId.make("command:remote-result:issue-after-result"),
+        parentThreadId: parent.threadId,
+        taskId: taskId!,
+        status: "completed",
+        result: "Done there.",
+        stoppedThere: "ran-out",
+      });
+      // The terminal card accepts nothing: a late issue is refused.
+      const late = yield* orchestrator
+        .dispatch({
+          type: "delegated_task.remote.issue",
+          commandId: CommandId.make("command:remote-issue:late"),
+          parentThreadId: parent.threadId,
+          taskId: taskId!,
+          issue: {
+            cause: "connectivity",
+            driverKind: "boat",
+            profileId: "boat-main",
+            message: "Lost the route after it ended.",
+            firstSeenAt: "2026-02-09T10:00:00Z",
+          },
+        })
+        .pipe(Effect.flip);
+      assert.equal(late._tag, "OrchestratorDispatchError");
+      const projection = yield* orchestrator.getThreadProjection(parent.threadId);
+      const task = projection.subagents.find((candidate) => candidate.id === taskId);
+      assert.equal(task?.status, "completed");
+      assert.equal(task?.remoteChild?.sandboxIssue, undefined);
     }),
   );
 });

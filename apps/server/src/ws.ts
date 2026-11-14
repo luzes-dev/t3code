@@ -1,3 +1,6 @@
+import * as CloudSandboxManager from "./cloudSandbox/CloudSandboxManager.ts";
+import * as CloudSandboxProfiles from "./cloudSandbox/CloudSandboxProfiles.ts";
+import { ManagedCloudSandboxControlError } from "@t3tools/contracts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- A synchronous digest inside the pure provider mapping.
 import * as NodeCrypto from "node:crypto";
@@ -1538,6 +1541,8 @@ export const layerWsRpc = (
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const secretResolver = yield* SecretResolver.SecretResolver;
       const peerLinks = yield* PeerLinks.PeerLinks;
+      const cloudSandboxes = yield* CloudSandboxManager.CloudSandboxManager;
+      const sandboxProfiles = yield* CloudSandboxProfiles.CloudSandboxProfiles;
       const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
@@ -2641,6 +2646,21 @@ export const layerWsRpc = (
           }),
         [WS_METHODS.serverRunStorageCleanup]: () => storageCleanup.runNow,
         [WS_METHODS.serverGetStorageCleanupReport]: () => storageCleanup.reports,
+        [WS_METHODS.cloudSandboxControl]: ({ resourceId, operation }) =>
+          cloudSandboxes.execute(resourceId, operation).pipe(
+            Effect.mapError(
+              (error) =>
+                new ManagedCloudSandboxControlError({
+                  cause: { reason: error.reason, message: error.message },
+                }),
+            ),
+          ),
+        [WS_METHODS.cloudSandboxProfilesList]: () =>
+          sandboxProfiles.list.pipe(Effect.map((profiles) => ({ profiles }))),
+        [WS_METHODS.cloudSandboxProfilesSave]: (input) => sandboxProfiles.saveStatus(input),
+        [WS_METHODS.cloudSandboxProfilesDelete]: ({ profileId }) =>
+          sandboxProfiles.remove(profileId).pipe(Effect.as({ profileId, deleted: true })),
+        [WS_METHODS.cloudSandboxProfilesTest]: (input) => sandboxProfiles.test(input),
         [WS_METHODS.serverGetDatabaseStorage]: () => databaseStorage.status,
         [WS_METHODS.serverReclaimDatabaseSpace]: () => databaseStorage.requestReclaim,
         [WS_METHODS.peerLinksList]: (_input) =>

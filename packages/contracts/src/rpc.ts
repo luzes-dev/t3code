@@ -7,6 +7,22 @@ import {
 } from "./orchestrationV2.ts";
 import { OrchestrationDispatchCommandError } from "./orchestrationDispatch.ts";
 import {
+  ManagedCloudSandboxResourceId,
+  ManagedCloudSandboxControlOperation,
+  ManagedCloudSandboxControlResult,
+} from "./managedCloudSandbox.ts";
+import {
+  CloudSandboxProfileError,
+  ManagedCloudSandboxControlError,
+} from "./managedCloudSandboxHttp.ts";
+import {
+  CloudSandboxCapabilities,
+  CloudSandboxProfileSaveInput,
+  CloudSandboxProfileTestInput,
+  CloudSandboxProfileStatus,
+  SandboxProfileId,
+} from "./environment.ts";
+import {
   McpAppCallToolInput,
   McpAppCallToolResult,
   McpAppReadResourceInput,
@@ -524,6 +540,11 @@ export const WS_METHODS = {
   peerLinksUnlink: "peerLinks.unlink",
   peerLinksAnswerRequest: "peerLinks.answerRequest",
   serverUpdateSettings: "server.updateSettings",
+  cloudSandboxControl: "cloudSandbox.control",
+  cloudSandboxProfilesList: "cloudSandbox.profiles.list",
+  cloudSandboxProfilesSave: "cloudSandbox.profiles.save",
+  cloudSandboxProfilesDelete: "cloudSandbox.profiles.delete",
+  cloudSandboxProfilesTest: "cloudSandbox.profiles.test",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverCheckSecretSource: "server.checkSecretSource",
   serverSearchAcpRegistry: "server.searchAcpRegistry",
@@ -870,6 +891,39 @@ const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
   }),
   success: ServerSettings,
   error: Schema.Union([ServerSettingsError, EnvironmentAuthorizationError]),
+});
+
+const WsCloudSandboxControlRpc = Rpc.make(WS_METHODS.cloudSandboxControl, {
+  payload: Schema.Struct({
+    resourceId: ManagedCloudSandboxResourceId,
+    operation: ManagedCloudSandboxControlOperation,
+  }),
+  success: ManagedCloudSandboxControlResult,
+  error: Schema.Union([ManagedCloudSandboxControlError, EnvironmentAuthorizationError]),
+});
+
+const WsCloudSandboxProfilesListRpc = Rpc.make(WS_METHODS.cloudSandboxProfilesList, {
+  payload: Schema.Struct({}),
+  success: Schema.Struct({ profiles: Schema.Array(CloudSandboxProfileStatus) }),
+  error: Schema.Union([CloudSandboxProfileError, EnvironmentAuthorizationError]),
+});
+
+const WsCloudSandboxProfilesSaveRpc = Rpc.make(WS_METHODS.cloudSandboxProfilesSave, {
+  payload: CloudSandboxProfileSaveInput,
+  success: CloudSandboxProfileStatus,
+  error: Schema.Union([CloudSandboxProfileError, EnvironmentAuthorizationError]),
+});
+
+const WsCloudSandboxProfilesDeleteRpc = Rpc.make(WS_METHODS.cloudSandboxProfilesDelete, {
+  payload: Schema.Struct({ profileId: SandboxProfileId }),
+  success: Schema.Struct({ profileId: SandboxProfileId, deleted: Schema.Boolean }),
+  error: Schema.Union([CloudSandboxProfileError, EnvironmentAuthorizationError]),
+});
+
+const WsCloudSandboxProfilesTestRpc = Rpc.make(WS_METHODS.cloudSandboxProfilesTest, {
+  payload: CloudSandboxProfileTestInput,
+  success: CloudSandboxCapabilities,
+  error: Schema.Union([CloudSandboxProfileError, EnvironmentAuthorizationError]),
 });
 
 const WsServerDiscoverSourceControlRpc = Rpc.make(WS_METHODS.serverDiscoverSourceControl, {
@@ -2122,6 +2176,11 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetDatabaseStorageRpc,
   WsServerReclaimDatabaseSpaceRpc,
   WsServerUpdateSettingsRpc,
+  WsCloudSandboxControlRpc,
+  WsCloudSandboxProfilesListRpc,
+  WsCloudSandboxProfilesSaveRpc,
+  WsCloudSandboxProfilesDeleteRpc,
+  WsCloudSandboxProfilesTestRpc,
   WsPeerLinksListRpc,
   WsPeerLinksLinkRpc,
   WsPeerLinksUnlinkRpc,

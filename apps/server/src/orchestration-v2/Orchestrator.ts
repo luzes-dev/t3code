@@ -666,6 +666,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "delegated_task.request":
     case "delegated_task.remote.request":
     case "delegated_task.remote.complete":
+    case "delegated_task.remote.issue":
     case "delegated_task.remote.stop":
     case "delegated_task.wake-policy":
     case "delegated_task.completion-delivery.acknowledge":
@@ -9586,6 +9587,78 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   });
 
   /**
+   * Surfaces a follower sandbox's degraded state on the task's card, or
+   * clears it when the controller host says the resource recovered. The
+   * issue is state, not history: an unchanged key records nothing, so a
+   * failing reconciler loop or a retried bind can never accumulate notices.
+   */
+  const dispatchRemoteDelegatedTaskIssue = Effect.fn(
+    "orchestrationV2.dispatch.remoteDelegatedTaskIssue",
+  )(function* (
+    command: Extract<
+      OrchestrationV2InternalCommand,
+      { readonly type: "delegated_task.remote.issue" }
+    >,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const parentProjection = yield* projectionStore
+      .getThreadRecords(command.parentThreadId, ["subagents"], {
+        omitSettledSubagents: { except: [command.taskId] },
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) => new OrchestratorProjectionError({ threadId: command.parentThreadId, cause }),
+        ),
+      );
+    const task = parentProjection.subagents.find(
+      (candidate) =>
+        candidate.id === command.taskId &&
+        candidate.origin === "app_owned" &&
+        candidate.remoteChild !== undefined,
+    );
+    if (task === undefined) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Delegated task ${command.taskId} is not a remote task of thread ${command.parentThreadId}.`,
+      });
+    }
+    // A task with its result stands; its card is terminal and accepts nothing further.
+    if (task.result !== null) return;
+    const remoteChild = task.remoteChild!;
+    const existing = remoteChild.sandboxIssue;
+    const next =
+      command.issue === undefined
+        ? existing === undefined
+          ? undefined
+          : null
+        : existing !== undefined &&
+            existing.cause === command.issue.cause &&
+            existing.driverKind === command.issue.driverKind &&
+            existing.profileId === command.issue.profileId
+          ? undefined
+          : command.issue;
+    if (next === undefined) return;
+    const now = yield* DateTime.now;
+    const nextRemoteChild: OrchestrationV2RemoteTaskChild =
+      next === null
+        ? (({ sandboxIssue: _issue, ...rest }) => rest)(remoteChild)
+        : { ...remoteChild, sandboxIssue: next };
+    yield* emit(
+      events,
+      command,
+    )({
+      type: "subagent.updated",
+      threadId: command.parentThreadId,
+      ...(task.runId === null ? {} : { runId: task.runId }),
+      nodeId: task.id,
+      driver: task.driver,
+      occurredAt: now,
+      payload: { ...task, remoteChild: nextRemoteChild, updatedAt: now },
+    });
+  });
+
+  /**
    * Completes a task that ran in a linked environment: the parent half of
    * `finalizeAppOwnedSubagent`, with the result its thread there ended with.
    * It runs under the parent's lock, so it never interleaves with a wake
@@ -14780,6 +14853,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "delegated_task.remote.complete":
         yield* dispatchRemoteDelegatedTaskComplete(command, events);
+        break;
+      case "delegated_task.remote.issue":
+        yield* dispatchRemoteDelegatedTaskIssue(command, events);
         break;
       case "delegated_task.remote.stop":
         yield* dispatchRemoteDelegatedTaskStop(command, events);

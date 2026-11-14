@@ -1,0 +1,261 @@
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import {
+  EnvironmentId,
+  IsoDateTime,
+  PositiveInt,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
+import {
+  CloudSandboxCapabilities,
+  CloudSandboxDetails,
+  CloudSandboxDriverKind,
+  CloudSandboxPrepareInput,
+  CloudSandboxOperationResult,
+  SandboxProfileId,
+  SandboxUsage,
+  SandboxRecording,
+} from "./environment.ts";
+
+/** Who created and controls the lifecycle of a managed sandbox resource. */
+export const ManagedSandboxOwner = Schema.Union([
+  Schema.TaggedStruct("user", {}),
+  Schema.TaggedStruct("thread", {
+    hostEnvironmentId: EnvironmentId,
+    threadId: ThreadId,
+  }),
+  Schema.TaggedStruct("task", {
+    hostEnvironmentId: EnvironmentId,
+    sourceThreadId: ThreadId,
+    taskId: Schema.String,
+  }),
+]);
+export type ManagedSandboxOwner = typeof ManagedSandboxOwner.Type;
+
+/** Retention policy applied when the owner finishes with the resource. */
+export const ManagedSandboxRetention = Schema.Literals([
+  "manual",
+  "stop-and-retain",
+  "delete-on-completion",
+]);
+export type ManagedSandboxRetention = typeof ManagedSandboxRetention.Type;
+/** Legacy records without owner/retention metadata decode as user-owned and manual. */
+export const legacyOwner = (): ManagedSandboxOwner => ({ _tag: "user" });
+export const legacyRetention = (): ManagedSandboxRetention => "manual";
+
+const AllocationOwnership = Schema.Struct({
+  sourceThreadId: ThreadId,
+  retention: ManagedSandboxRetention,
+});
+
+/**
+ * Why a managed sandbox is degraded, as its owner-facing and admin surfaces render
+ * it. Emitters overwrite on retry and clear on recovery: presence is state, not
+ * history. Plain strings, not branded ids, so record spreads keep their inference stable.
+ */
+export const ManagedCloudSandboxIssue = Schema.Struct({
+  cause: Schema.Literals(["provider-auth", "connectivity", "bind", "allocation"]),
+  driverKind: Schema.String,
+  profileId: Schema.String,
+  message: TrimmedNonEmptyString,
+  firstSeenAt: IsoDateTime,
+});
+export type ManagedCloudSandboxIssue = typeof ManagedCloudSandboxIssue.Type;
+export type ManagedSandboxFollowerOwner = Exclude<ManagedSandboxOwner, { _tag: "user" }>;
+export const MANAGED_CLOUD_SANDBOX_PATH = "/api/cloud-sandboxes/managed";
+export const managedCloudSandboxProxyPath = (resourceId: string) =>
+  `${MANAGED_CLOUD_SANDBOX_PATH}/${resourceId}/proxy`;
+export const isManagedCloudSandboxProxyPath = (pathname: string): boolean =>
+  /^\/api\/cloud-sandboxes\/managed\/[a-zA-Z0-9_-]{1,128}\/proxy\/?$/u.test(pathname);
+export const MANAGED_CLOUD_SOURCE_PORT = 47773;
+export const ManagedCloudSandboxResourceId = TrimmedNonEmptyString.check(
+  Schema.isPattern(/^[a-zA-Z0-9_-]{1,128}$/u),
+).pipe(Schema.brand("ManagedCloudSandboxResourceId"));
+export type ManagedCloudSandboxResourceId = typeof ManagedCloudSandboxResourceId.Type;
+export const ManagedCloudSandboxResource = Schema.Struct({
+  resourceId: ManagedCloudSandboxResourceId,
+  controllerEnvironmentId: EnvironmentId,
+  driverKind: CloudSandboxDriverKind,
+  profileId: SandboxProfileId,
+  sandboxId: Schema.NullOr(Schema.String),
+  parentResourceId: Schema.NullOr(ManagedCloudSandboxResourceId),
+  owner: ManagedSandboxOwner.pipe(Schema.withDecodingDefault(Effect.succeed(legacyOwner()))),
+  retention: ManagedSandboxRetention.pipe(
+    Schema.withDecodingDefault(Effect.succeed(legacyRetention())),
+  ),
+  phase: Schema.Literals([
+    "allocating",
+    "connecting",
+    "connected",
+    "disconnected",
+    "stopped",
+    "deleting",
+    "deleted",
+    "failed",
+  ]),
+  environmentId: Schema.NullOr(EnvironmentId),
+  label: Schema.String,
+  recordingIds: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  /** Present while the resource is degraded; cleared when it connects again. */
+  issue: Schema.optional(ManagedCloudSandboxIssue),
+});
+export type ManagedCloudSandboxResource = typeof ManagedCloudSandboxResource.Type;
+export const ManagedCloudSandboxConnection = Schema.Struct({
+  sandboxId: Schema.String,
+  driverKind: CloudSandboxDriverKind,
+  resourceId: ManagedCloudSandboxResourceId,
+  controllerEnvironmentId: EnvironmentId,
+  environmentId: EnvironmentId,
+  label: Schema.String,
+  routePrefix: Schema.String,
+  bearerToken: Schema.String,
+});
+export type ManagedCloudSandboxConnection = typeof ManagedCloudSandboxConnection.Type;
+export const ManagedCloudSandboxProvisionInput = Schema.Struct({
+  ...CloudSandboxPrepareInput.fields,
+  operationId: ManagedCloudSandboxResourceId,
+  enableLinkedEnvironments: Schema.optionalKey(Schema.Boolean),
+  ownership: Schema.optionalKey(AllocationOwnership),
+});
+export type ManagedCloudSandboxProvisionInput = typeof ManagedCloudSandboxProvisionInput.Type;
+export const ManagedCloudSandboxForkInput = Schema.Struct({
+  sourceResourceId: ManagedCloudSandboxResourceId,
+  operationId: ManagedCloudSandboxResourceId,
+  name: TrimmedNonEmptyString,
+  size: Schema.optionalKey(Schema.String),
+  autoStopMinutes: Schema.optionalKey(
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 43200 })),
+  ),
+  enableLinkedEnvironments: Schema.optionalKey(Schema.Boolean),
+  ownership: Schema.optionalKey(AllocationOwnership),
+});
+export type ManagedCloudSandboxForkInput = typeof ManagedCloudSandboxForkInput.Type;
+/** Valid lifecycle/owner/retention combinations for a bound resource. */
+export const retentionForOwner = (owner: ManagedSandboxOwner): ManagedSandboxRetention =>
+  owner._tag === "user" ? "manual" : "stop-and-retain";
+
+export const ManagedCloudSandboxControlOperation = Schema.Union([
+  Schema.TaggedStruct("usage", {}),
+  Schema.TaggedStruct("recordingStart", { recordingId: ManagedCloudSandboxResourceId }),
+  Schema.TaggedStruct("recordingStatus", { recordingId: ManagedCloudSandboxResourceId }),
+  Schema.TaggedStruct("recordingStop", { recordingId: ManagedCloudSandboxResourceId }),
+  Schema.TaggedStruct("resize", { size: Schema.String }),
+  Schema.TaggedStruct("get", {}),
+  Schema.TaggedStruct("stop", {}),
+  Schema.TaggedStruct("resume", {}),
+  Schema.TaggedStruct("desktop", {
+    viewMode: Schema.optionalKey(Schema.Literals(["desktop", "browser"])),
+  }),
+  Schema.TaggedStruct("extend", {
+    hours: Schema.Number.check(Schema.isBetween({ minimum: 1, maximum: 720 })),
+  }),
+  Schema.TaggedStruct("host", {
+    port: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 })),
+    isPublic: Schema.Boolean,
+  }),
+]);
+export type ManagedCloudSandboxControlOperation = typeof ManagedCloudSandboxControlOperation.Type;
+export const ManagedCloudSandboxControlResult = Schema.Union([
+  ...CloudSandboxOperationResult.members,
+  Schema.TaggedStruct("usage", { usage: SandboxUsage }),
+  Schema.TaggedStruct("recording", { recording: SandboxRecording }),
+]);
+export type ManagedCloudSandboxControlResult = typeof ManagedCloudSandboxControlResult.Type;
+export const ManagedCloudSandboxOperationResult = Schema.Union([
+  Schema.TaggedStruct("connection", { connection: ManagedCloudSandboxConnection }),
+  Schema.TaggedStruct("resource", { resource: ManagedCloudSandboxResource }),
+  Schema.TaggedStruct("list", { resources: Schema.Array(ManagedCloudSandboxResource) }),
+  Schema.TaggedStruct("result", { result: ManagedCloudSandboxControlResult }),
+  Schema.TaggedStruct("deleted", {}),
+  Schema.TaggedStruct("disconnected", {}),
+]);
+export type ManagedCloudSandboxOperationResult = typeof ManagedCloudSandboxOperationResult.Type;
+export const ManagedCloudSandboxOperation = Schema.Union([
+  Schema.TaggedStruct("provision", ManagedCloudSandboxProvisionInput.fields),
+  Schema.TaggedStruct("connect", { resourceId: ManagedCloudSandboxResourceId }),
+  Schema.TaggedStruct("get", { resourceId: ManagedCloudSandboxResourceId }),
+  Schema.TaggedStruct("list", {}),
+  Schema.TaggedStruct("execute", {
+    resourceId: ManagedCloudSandboxResourceId,
+    operation: ManagedCloudSandboxControlOperation,
+  }),
+  Schema.TaggedStruct("fork", ManagedCloudSandboxForkInput.fields),
+  Schema.TaggedStruct("delete", { resourceId: ManagedCloudSandboxResourceId }),
+  Schema.TaggedStruct("disconnect", { resourceId: ManagedCloudSandboxResourceId }),
+  // Binds a provisioned/forked resource to its owning thread or task after the
+  // delegated child exists. Host ids are re-derived server-side; clients cannot
+  // assert them.
+  Schema.TaggedStruct("bindOwner", {
+    resourceId: ManagedCloudSandboxResourceId,
+    owner: Schema.Union([ManagedSandboxOwner.members[1], ManagedSandboxOwner.members[2]]),
+    retention: Schema.optionalKey(ManagedSandboxRetention),
+  }),
+]);
+export type ManagedCloudSandboxOperation = typeof ManagedCloudSandboxOperation.Type;
+export const ManagedCloudSandboxContext = Schema.Struct({
+  resourceId: ManagedCloudSandboxResourceId,
+  controllerEnvironmentId: EnvironmentId,
+  controllerBaseUrl: Schema.String,
+  grantToken: Schema.String,
+});
+export type ManagedCloudSandboxContext = typeof ManagedCloudSandboxContext.Type;
+
+/** One managed sandbox located by its environment, for client control surfaces. */
+export const CloudSandboxEnvironmentStatus = Schema.Struct({
+  resourceId: ManagedCloudSandboxResourceId,
+  controllerEnvironmentId: EnvironmentId,
+  sandbox: CloudSandboxDetails,
+  capabilities: CloudSandboxCapabilities,
+  usage: Schema.NullOr(SandboxUsage),
+  recordingIds: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+});
+export type CloudSandboxEnvironmentStatus = typeof CloudSandboxEnvironmentStatus.Type;
+export const ManagedCloudSandboxSourceOperation = Schema.Union([
+  Schema.TaggedStruct("host", {
+    port: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 })),
+  }),
+  Schema.TaggedStruct("get", { resourceId: Schema.optionalKey(ManagedCloudSandboxResourceId) }),
+  Schema.TaggedStruct("status", { resourceId: ManagedCloudSandboxResourceId }),
+  Schema.TaggedStruct("fork", {
+    operationId: ManagedCloudSandboxForkInput.fields.operationId,
+    name: ManagedCloudSandboxForkInput.fields.name,
+    size: ManagedCloudSandboxForkInput.fields.size,
+    autoStopMinutes: ManagedCloudSandboxForkInput.fields.autoStopMinutes,
+    enableLinkedEnvironments: ManagedCloudSandboxForkInput.fields.enableLinkedEnvironments,
+    ownership: ManagedCloudSandboxForkInput.fields.ownership,
+  }),
+  Schema.TaggedStruct("connect", { resourceId: ManagedCloudSandboxResourceId }),
+  Schema.TaggedStruct("delete", { resourceId: ManagedCloudSandboxResourceId }),
+  // A follower of this sandbox binds its own fork's ownership after its child
+  // task exists; the controller re-derives the host from the authenticating resource.
+  Schema.TaggedStruct("bindOwner", {
+    resourceId: ManagedCloudSandboxResourceId,
+    owner: Schema.Union([ManagedSandboxOwner.members[1], ManagedSandboxOwner.members[2]]),
+    retention: Schema.optionalKey(ManagedSandboxRetention),
+  }),
+  // A follower pulls the controller's approved inheritable settings; the
+  // controller classifies every field against its allowlist before answering.
+  Schema.TaggedStruct("hostSettings", {}),
+]);
+export type ManagedCloudSandboxSourceOperation = typeof ManagedCloudSandboxSourceOperation.Type;
+
+/** Approved controller settings for followers: only allowlisted, non-default
+ * fields, at one monotonically increasing revision issued per host change. */
+export const FollowerHostSettingsSnapshot = Schema.Struct({
+  revision: PositiveInt,
+  fields: Schema.Record(Schema.String, Schema.Json),
+});
+export type FollowerHostSettingsSnapshot = typeof FollowerHostSettingsSnapshot.Type;
+
+export const ManagedCloudSandboxSourceResult = Schema.Union([
+  Schema.TaggedStruct("connection", {
+    connection: ManagedCloudSandboxConnection,
+    pairingToken: Schema.String,
+  }),
+  Schema.TaggedStruct("resource", { resource: ManagedCloudSandboxResource }),
+  Schema.TaggedStruct("result", { result: ManagedCloudSandboxControlResult }),
+  Schema.TaggedStruct("deleted", {}),
+  Schema.TaggedStruct("hostSettings", { snapshot: FollowerHostSettingsSnapshot }),
+]);
+export type ManagedCloudSandboxSourceResult = typeof ManagedCloudSandboxSourceResult.Type;

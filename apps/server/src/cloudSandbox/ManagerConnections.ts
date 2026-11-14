@@ -1,0 +1,386 @@
+import * as Mac from "effect/crypto/Mac";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Hex from "effect/encoding/Hex";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import { HttpClientRequest } from "effect/http";
+import { maintainActiveSandbox, type BaseCloudSandboxDriver } from "@t3tools/cloud-sandbox";
+import {
+  CLOUD_SANDBOX_ACTIVITY_PATH,
+  MANAGED_CLOUD_SOURCE_PORT,
+  CloudSandboxActivity,
+  type ManagedCloudSandboxResourceId,
+  managedCloudSandboxProxyPath,
+} from "@t3tools/contracts";
+import * as Store from "./CloudSandboxStore.ts";
+import type { ManagedCloudSandboxRoute } from "./CloudSandboxManager.ts";
+import type { ManagerReservations } from "./ManagerReservations.ts";
+import {
+  isDeletedOrDeleting,
+  stampConnectIssue,
+  stampIssue,
+  toError,
+  withoutIssue,
+  type ManagerRuntime,
+} from "./ManagerRuntime.ts";
+
+const decodeActivity = Schema.decodeUnknownEffect(CloudSandboxActivity);
+export const makeConnections = (rt: ManagerRuntime, reservations: ManagerReservations) => {
+  const {
+    renewalsEnabled,
+    store,
+    secrets,
+    transport,
+    httpClient,
+    controllerEnvironmentId,
+    scope,
+    locks,
+    routes,
+    workers,
+    requireRecord,
+    resolveProfile,
+    driverFor,
+    requireSandbox,
+    stopWorker,
+  } = rt;
+  const sourceContext = Effect.fn("CloudSandboxManager.sourceContext")(function* (
+    id: ManagedCloudSandboxResourceId,
+    token: string,
+  ) {
+    const stored = yield* secrets.get(`cloud-source-${id}`).pipe(Effect.mapError(toError));
+    if (Option.isNone(stored)) {
+      return yield* new Store.CloudSandboxManagerError({ reason: "ownership" });
+    }
+    const encoder = new TextEncoder();
+    const storedGrant = encoder.encode(Hex.encode(stored.value));
+    const candidateGrant = encoder.encode(token);
+    const tokenMatches =
+      storedGrant.byteLength === candidateGrant.byteLength &&
+      Mac.timingSafeEqual(storedGrant, candidateGrant);
+    if (!tokenMatches) {
+      return yield* new Store.CloudSandboxManagerError({ reason: "ownership" });
+    }
+    const record = yield* requireRecord(id);
+    if (isDeletedOrDeleting(record))
+      return yield* new Store.CloudSandboxManagerError({ reason: "ownership" });
+    return {
+      resourceId: id,
+      controllerEnvironmentId,
+      controllerBaseUrl: `http://127.0.0.1:${MANAGED_CLOUD_SOURCE_PORT}`,
+      grantToken: token,
+    };
+  });
+
+  const prepareForkSnapshot = Effect.fn("CloudSandboxManager.prepareForkSnapshot")(function* (
+    initial: Store.CloudSandboxRecord,
+    driver: BaseCloudSandboxDriver,
+  ) {
+    let record = initial;
+    if (record.snapshotName === null) return record;
+    const snapshotName = record.snapshotName;
+    if (!driver.snapshots) return yield* new Store.CloudSandboxManagerError({ reason: "provider" });
+    if (record.snapshotReady) return record;
+    const source = record.parentResourceId ? yield* requireRecord(record.parentResourceId) : null;
+    if (!source) return yield* new Store.CloudSandboxManagerError({ reason: "conflict" });
+    const existingSnapshot = yield* driver.snapshots.get(snapshotName).pipe(
+      Effect.catchIf(
+        (cause) => cause.reason === "not-found",
+        () => Effect.succeed(null),
+      ),
+    );
+    if (
+      existingSnapshot !== null &&
+      existingSnapshot.sourceSandboxId !== (yield* requireSandbox(source))
+    )
+      return yield* new Store.CloudSandboxManagerError({ reason: "conflict" });
+    if (existingSnapshot === null) {
+      yield* driver.snapshots.capture({
+        sandboxId: yield* requireSandbox(source),
+        name: snapshotName,
+      });
+    }
+    yield* driver.snapshots.waitReady(snapshotName);
+    record = { ...record, snapshotReady: true };
+    yield* store.save(record);
+    return record;
+  });
+
+  const ensureGrantToken = Effect.fn("CloudSandboxManager.ensureGrantToken")(function* (
+    resourceId: ManagedCloudSandboxResourceId,
+  ) {
+    const bytes = yield* secrets
+      .getOrCreateRandom(`cloud-source-${resourceId}`, 32)
+      .pipe(Effect.mapError(toError));
+    return Hex.encode(bytes);
+  });
+
+  /**
+   * Finds this record's VM by the durable name every managed create gives the
+   * provider, so a lost create response or a crashed controller re-adopts the
+   * original VM instead of allocating a second one. Adoption requires the exact
+   * `t3-<operationId>` name, which this controller alone mints.
+   */
+  const adoptOrphanSandbox = Effect.fn("CloudSandboxManager.adoptOrphan")(function* (
+    record: Store.CloudSandboxRecord,
+    driver: BaseCloudSandboxDriver,
+  ) {
+    const expectedName = `t3-${record.resourceId}`;
+    const listed = yield* driver.list().pipe(Effect.option);
+    if (Option.isNone(listed)) return Option.none();
+    const match = listed.value.find((sandbox) => sandbox.name === expectedName);
+    return match === undefined ? Option.none() : Option.some(match.sandboxId);
+  });
+
+  /** Reconciler entry: adopt a crashed allocation's orphan or leave a failed record. */
+  const recoverUnallocated = Effect.fn("CloudSandboxManager.recoverUnallocated")(function* (
+    record: Store.CloudSandboxRecord,
+  ) {
+    const driver = yield* driverFor(record);
+    const orphan = yield* adoptOrphanSandbox(record, driver);
+    if (Option.isNone(orphan)) {
+      const failed = { ...record, lifecycle: "failed" as const };
+      yield* store.save(failed);
+      // No VM was recovered: the record says why, and its owner's card learns
+      // from the workspaces reporter.
+      yield* stampIssue(store, failed, {
+        cause: "allocation",
+        driverKind: failed.driverKind,
+        profileId: failed.profileId,
+        message: "No virtual machine could be recovered for this sandbox.",
+        firstSeenAt: DateTime.formatIso(yield* DateTime.now),
+      });
+      return;
+    }
+    const recovered = { ...record, sandboxId: orphan.value };
+    yield* store.save(recovered);
+    yield* connectRecord(recovered, false);
+  });
+
+  const connectRecordUnchecked = Effect.fn("CloudSandboxManager.connectRecord")(function* (
+    initial: Store.CloudSandboxRecord,
+    allowResume: boolean,
+  ) {
+    let record = initial;
+    if (isDeletedOrDeleting(record))
+      return yield* new Store.CloudSandboxManagerError({ reason: "deleted" });
+    const driver = yield* driverFor(record);
+    if (record.sandboxId === null) {
+      record = yield* prepareForkSnapshot(record, driver);
+      // The provider cannot be queried by the create's idempotency key, so every
+      // managed VM carries its durable operation id in its provider name and a
+      // lost create response is recovered by that name instead of a new VM.
+      const orphan = yield* adoptOrphanSandbox(record, driver);
+      if (Option.isSome(orphan)) {
+        record = { ...record, sandboxId: orphan.value };
+      } else {
+        const sandbox = yield* driver.create({
+          ...record.selection,
+          requestId: record.resourceId,
+          noEnv: true,
+          name: `t3-${record.resourceId}`,
+        });
+        record = { ...record, sandboxId: sandbox.sandboxId };
+      }
+      yield* store.save(record);
+    }
+    const sandboxId = yield* requireSandbox(record);
+    const grantToken = yield* ensureGrantToken(record.resourceId);
+    const { apiKey } = yield* resolveProfile(record.profileId);
+    const connected = yield* transport.connect({
+      resourceId: record.resourceId,
+      driverKind: record.driverKind,
+      apiKey,
+      sandboxId,
+      parentSandboxId:
+        record.parentResourceId === null
+          ? null
+          : (yield* requireRecord(record.parentResourceId)).sandboxId,
+      allowResume,
+      expectedEnvironmentId: record.environmentId,
+      context: {
+        resourceId: record.resourceId,
+        controllerEnvironmentId,
+        controllerBaseUrl: `http://127.0.0.1:${MANAGED_CLOUD_SOURCE_PORT}`,
+        grantToken,
+      },
+      enableLinkedEnvironments: record.enableLinkedEnvironments,
+    });
+    const result: ManagedCloudSandboxRoute = {
+      ...connected,
+      connection: {
+        sandboxId,
+        driverKind: record.driverKind,
+        resourceId: record.resourceId,
+        controllerEnvironmentId,
+        environmentId: connected.environmentId,
+        label: connected.label,
+        routePrefix: managedCloudSandboxProxyPath(record.resourceId),
+        bearerToken: connected.bearerToken,
+      },
+    };
+    routes.set(record.resourceId, result);
+    record = {
+      ...record,
+      lifecycle: "active",
+      power: "running",
+      intent: "connected",
+      environmentId: connected.environmentId,
+      label: connected.label,
+    };
+    yield* store.save(record);
+    // Connected again: the record's issue was presence, and recovery erases it.
+    if (record.issue !== undefined) {
+      record = withoutIssue(record);
+      yield* store.save(record);
+    }
+    if (record.snapshotName !== null && driver.snapshots) {
+      yield* driver.snapshots.delete(record.snapshotName).pipe(
+        Effect.catchTags({
+          CloudSandboxError: (error) =>
+            error.reason === "not-found" ? Effect.void : Effect.fail(error),
+        }),
+      );
+      record = { ...record, snapshotName: null };
+      yield* store.save(record);
+    }
+    yield* stopWorker(record.resourceId);
+    if (driver.keepalive && renewalsEnabled) {
+      const active = httpClient
+        .execute(
+          HttpClientRequest.get(
+            new URL(CLOUD_SANDBOX_ACTIVITY_PATH, connected.httpBaseUrl).toString(),
+          ).pipe(HttpClientRequest.bearerToken(connected.bearerToken)),
+        )
+        .pipe(
+          Effect.flatMap((response) =>
+            response.status === 200 ? response.json : Effect.succeed({ active: false }),
+          ),
+          Effect.flatMap(decodeActivity),
+          Effect.map((activity) => activity.active),
+        );
+      const worker = yield* maintainActiveSandbox(
+        {
+          extendAutoStop: (_sandboxId, hours) =>
+            locks.withLock(record.resourceId, reservations.extend(record.resourceId, hours)),
+        },
+        sandboxId,
+        active,
+        {
+          autoStopMinutes: record.selection.autoStopMinutes,
+        },
+      ).pipe(
+        Effect.catchCause(() => Effect.logWarning("Managed cloud keepalive stopped.")),
+        Effect.forkIn(scope),
+      );
+      workers.set(record.resourceId, worker);
+    }
+    return result;
+  }, Effect.mapError(toError));
+
+  const connectRecord = Effect.fn("CloudSandboxManager.connectWithCleanup")(function* (
+    initial: Store.CloudSandboxRecord,
+    allowResume: boolean,
+  ) {
+    return yield* connectRecordUnchecked(initial, allowResume).pipe(
+      // Stamp the loss on the record before the cleanup below re-saves it:
+      // both the owner's card and the admin list read the record's issue.
+      Effect.tapError((error) => stampConnectIssue(store, initial.resourceId, error)),
+      Effect.onExit((exit) => {
+        if (Exit.isSuccess(exit)) return Effect.void;
+        return Effect.gen(function* () {
+          const saved = yield* store.get(initial.resourceId);
+          if (Option.isNone(saved)) return;
+          const current = saved.value;
+          yield* stopWorker(initial.resourceId);
+          routes.delete(initial.resourceId);
+          yield* transport.disconnect(initial.resourceId);
+          if (current.sandboxId === null) {
+            yield* store.save({ ...current, lifecycle: "failed" });
+            return;
+          }
+          // A working sandbox keeps its state, and reconcile retries its connect.
+          if (current.environmentId === null) {
+            const driver = yield* driverFor(current);
+            const stopped = yield* driver.stop(current.sandboxId).pipe(Effect.option);
+            yield* store.save({
+              ...current,
+              lifecycle: "deleting",
+              power: Option.isSome(stopped) ? "stopped" : current.power,
+            });
+          }
+        }).pipe(Effect.ignore);
+      }),
+    );
+  });
+
+  const connectUnlocked = Effect.fn("CloudSandboxManager.connect")(
+    (id: ManagedCloudSandboxResourceId, allowResume: boolean) =>
+      Effect.gen(function* () {
+        const record = yield* requireRecord(id);
+        if (!allowResume && (record.sandboxId === null || record.environmentId === null))
+          return yield* new Store.CloudSandboxManagerError({ reason: "transport" });
+        if (isDeletedOrDeleting(record))
+          return yield* new Store.CloudSandboxManagerError({ reason: "deleted" });
+        const route = routes.get(id);
+        if (route || (!allowResume && record.sandboxId !== null)) {
+          const driver = yield* driverFor(record);
+          const status = yield* driver
+            .get(yield* requireSandbox(record))
+            .pipe(Effect.mapError(toError));
+          if (route) {
+            if (status.state === "ready" && (yield* transport.isConnected(id))) return route;
+            yield* disconnectUnlocked(id);
+          }
+          if (!allowResume && status.state === "stopped") {
+            yield* store.save({ ...record, power: "stopped" });
+            return yield* new Store.CloudSandboxManagerError({ reason: "transport" });
+          }
+        }
+        return yield* connectRecord(record, allowResume);
+      }),
+  );
+
+  const connect = Effect.fn("CloudSandboxManager.connectLocked")(
+    (id: ManagedCloudSandboxResourceId) => locks.withLock(id, connectUnlocked(id, false)),
+  );
+
+  const disconnectUnlocked = Effect.fn("CloudSandboxManager.disconnect")(function* (
+    id: ManagedCloudSandboxResourceId,
+  ) {
+    const record = yield* requireRecord(id);
+    if (isDeletedOrDeleting(record)) return;
+    yield* stopWorker(id);
+    routes.delete(id);
+    yield* transport.disconnect(id);
+    yield* store.save({ ...record, intent: "disconnected" });
+  });
+
+  const disconnect = Effect.fn("CloudSandboxManager.disconnectLocked")(
+    (id: ManagedCloudSandboxResourceId) => locks.withLock(id, disconnectUnlocked(id)),
+  );
+
+  const route = Effect.fn("CloudSandboxManager.route")(function* (
+    id: ManagedCloudSandboxResourceId,
+  ) {
+    const cached = routes.get(id);
+    if (!cached) return yield* new Store.CloudSandboxManagerError({ reason: "transport" });
+    return cached;
+  });
+
+  return {
+    prepareForkSnapshot,
+    ensureGrantToken,
+    sourceContext,
+    connectRecord,
+    connectUnlocked,
+    connect,
+    disconnectUnlocked,
+    disconnect,
+    route,
+    recoverUnallocated,
+  };
+};
+
+export type ManagerConnections = ReturnType<typeof makeConnections>;

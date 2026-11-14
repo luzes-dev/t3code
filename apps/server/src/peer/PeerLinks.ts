@@ -9,6 +9,7 @@ import {
   type PeerLink,
   type PeerLinkCreateInput,
   PeerLinkError,
+  isManagedCloudSandboxProxyPath,
   type PeerLinkSummary,
 } from "@t3tools/contracts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
@@ -103,6 +104,11 @@ export class PeerLinks extends Context.Service<
     ) => Effect.Effect<Option.Option<PeerLink>, PeerLinkError>;
     /** Forgets the link here. The peer still lists the session until it is revoked there. */
     readonly unlink: (environmentId: EnvironmentId) => Effect.Effect<boolean, PeerLinkError>;
+    /** Points a stored link at a new address for the same peer; a missing link is left alone. */
+    readonly repoint: (
+      environmentId: EnvironmentId,
+      url: string,
+    ) => Effect.Effect<void, PeerLinkError>;
     /** An address that answers as the linked peer, with its token, ready to call. */
     readonly resolve: (
       environmentId: EnvironmentId,
@@ -148,11 +154,10 @@ const failStorage = (cause: unknown) =>
   );
 
 /**
- * The base URL a peer is reached at, normalised to its origin. The pairing
- * code and then the link's token travel to it, so plain http is accepted only
- * where the network already encrypts: this machine, or a Tailscale address.
+ * Managed children share their controller's origin and retain their exact proxy prefix.
+ * Plain HTTP credentials are restricted to loopback or an encrypted tailnet.
  */
-const peerOrigin = (url: string) => {
+const peerEndpoint = (url: string) => {
   const parsed = URL.parse(url);
   if (parsed === null || (parsed.protocol !== "https:" && parsed.protocol !== "http:")) {
     return Effect.fail(
@@ -174,7 +179,10 @@ const peerOrigin = (url: string) => {
       }),
     );
   }
-  return Effect.succeed(parsed.origin);
+  const prefix = isManagedCloudSandboxProxyPath(parsed.pathname)
+    ? parsed.pathname.replace(/\/$/u, "")
+    : "";
+  return Effect.succeed(`${parsed.origin}${prefix}`);
 };
 
 /** The system error under a failed connection, such as ECONNREFUSED or ENOTFOUND. */
@@ -239,7 +247,7 @@ const make = Effect.gen(function* () {
     Effect.orDie,
   );
 
-  // Only the origin `peerOrigin` checked may receive a pairing code or token:
+  // Only the endpoint `peerEndpoint` checked may receive a pairing code or token:
   // a redirect could forward them anywhere, including plain http.
   const peerHttpClient = HttpClient.transform(httpClient, (response) =>
     Effect.provideService(response, FetchHttpClient.RequestInit, { redirect: "manual" }),
@@ -334,7 +342,7 @@ const make = Effect.gen(function* () {
         yield* digest.digest(Digest.sha256, new TextEncoder().encode(verifier)).pipe(Effect.orDie),
       );
       const state = Base64Url.encode(yield* random.randomBytes(16));
-      const resource = `${origin}/mcp`;
+      const { resource } = yield* client.mcpOAuth.protectedResource();
       const decided = yield* client.mcpOAuth
         .decision({
           headers: {},
@@ -437,7 +445,7 @@ const make = Effect.gen(function* () {
       urls,
       (url) =>
         Effect.gen(function* () {
-          const origin = yield* peerOrigin(url);
+          const origin = yield* peerEndpoint(url);
           // Loopback is this machine, where anything may answer as the one picked.
           if (isOwnLoopback(new URL(origin).hostname)) {
             return yield* new PeerLinkError({
@@ -476,7 +484,7 @@ const make = Effect.gen(function* () {
 
   /** The peer at `url`, with every address checked for credentials first. */
   const answeringAt = Effect.fn("PeerLinks.answeringAt")(function* (urls: ReadonlyArray<string>) {
-    const origins = yield* Effect.forEach(urls, peerOrigin);
+    const origins = yield* Effect.forEach(urls, peerEndpoint);
     const primary = origins[0]!;
     return { primary, peer: yield* probe(primary), origins };
   });
@@ -633,6 +641,21 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const repoint: PeerLinks["Service"]["repoint"] = Effect.fn("PeerLinks.repoint")(
+    function* (environmentId, url) {
+      const origin = yield* peerEndpoint(url);
+      const row = yield* readRow(environmentId);
+      if (Option.isNone(row)) return;
+      const urls = yield* decodeUrls(row.value.urls_json).pipe(Effect.catch(failStorage));
+      if (urls.length === 1 && urls[0] === origin) return;
+      const urlsJson = yield* encodeUrls([origin]).pipe(Effect.catch(failStorage));
+      yield* sql`
+      UPDATE peer_environment_links SET urls_json = ${urlsJson}
+      WHERE environment_id = ${environmentId}
+    `.pipe(Effect.catch(failStorage));
+    },
+  );
+
   const resolve: PeerLinks["Service"]["resolve"] = Effect.fn("PeerLinks.resolve")(
     function* (environmentId) {
       const row = yield* readRow(environmentId);
@@ -716,6 +739,7 @@ const make = Effect.gen(function* () {
     list,
     get,
     unlink,
+    repoint,
     resolve,
     recordOutcome,
   });

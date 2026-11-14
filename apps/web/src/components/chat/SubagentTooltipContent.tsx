@@ -2,6 +2,7 @@ import type {
   OrchestrationV2ThreadShell,
   OrchestrationV2TurnItemStatus,
   OrchestrationProjectShell,
+  ManagedCloudSandboxIssue,
   ServerProvider,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -11,6 +12,7 @@ import {
   resolveSubagentMetadata,
   subagentDetailPreview,
 } from "@t3tools/client-runtime/state/subagent-display";
+import { describeManagedCloudSandboxIssue } from "@t3tools/client-runtime/state/cloudSandbox";
 import { REASONING_EFFORT_OPTION_IDS } from "@t3tools/client-runtime/state/thread-execution";
 import { getModelSelectionStringOptionValue, resolveSelectableModel } from "@t3tools/shared/model";
 import { getTraitsSpeedDisplay, TraitsSpeedIcon } from "./TraitsSpeed";
@@ -23,6 +25,7 @@ import {
   FolderIcon,
   GitBranchIcon,
   TerminalIcon,
+  TriangleAlertIcon,
 } from "lucide-react";
 import { ThreadHoverCard } from "../ThreadHoverCard";
 import { MiddleTruncate } from "../ui/middle-truncate";
@@ -49,6 +52,7 @@ export function SubagentTooltipContent(props: {
   status: OrchestrationV2TurnItemStatus;
   result?: string | null | undefined;
   progress?: string | null | undefined;
+  sandboxIssue?: ManagedCloudSandboxIssue | undefined;
 }) {
   const childSelection =
     props.modelSelection ??
@@ -167,6 +171,14 @@ export function SubagentTooltipContent(props: {
         </span>
         {props.elapsed}
       </div>
+      {props.sandboxIssue ? (
+        <div className="flex min-w-0 items-center gap-2">
+          <TriangleAlertIcon aria-hidden className="size-3 shrink-0 text-warning" />
+          <span className="min-w-0 truncate text-warning">
+            {describeManagedCloudSandboxIssue(props.sandboxIssue)}
+          </span>
+        </div>
+      ) : null}
       {metadata.map(({ label, value }) => {
         const Icon = label === "Branch" ? GitBranchIcon : FolderIcon;
         return (

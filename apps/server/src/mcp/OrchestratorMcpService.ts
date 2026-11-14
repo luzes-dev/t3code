@@ -1,7 +1,10 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Synchronous deterministic stable resource ID generation.
+import * as NodeCrypto from "node:crypto";
 import {
   CommandId,
   type RunId,
   isProviderAvailable,
+  ManagedCloudSandboxResourceId,
   MessageId,
   type ModelSelection,
   NodeId,
@@ -129,6 +132,7 @@ import { isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
+import * as CloudSandboxWorkspaces from "../workspace/CloudSandboxWorkspaces.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
 // Nothing is written while a task wait blocks, and Node fetch drops a silent call at 300 s.
@@ -772,6 +776,18 @@ function stableOperationMessageId(input: {
   );
 }
 
+function stableSandboxWorkspaceId(
+  scope: McpInvocationScope,
+  threadId: ThreadId,
+  requestKey: string,
+): ManagedCloudSandboxResourceId {
+  const digest = NodeCrypto.createHash("sha256")
+    .update(JSON.stringify([scope.requestNamespace, threadId, requestKey]))
+    .digest("hex")
+    .slice(0, 32);
+  return ManagedCloudSandboxResourceId.make(`fleet-${digest}`);
+}
+
 function threadTitle(input: {
   readonly parentTitle: string;
   readonly prompt: string | undefined;
@@ -1113,6 +1129,7 @@ const make = Effect.gen(function* () {
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const remoteDelegation = yield* RemoteDelegation.RemoteDelegation;
+  const cloudWorkspaces = yield* CloudSandboxWorkspaces.CloudSandboxWorkspaces;
 
   const requireProject = (projectId: ProjectId) =>
     projects.getById(projectId).pipe(
@@ -2519,6 +2536,37 @@ const make = Effect.gen(function* () {
         input.interactionMode,
       );
       let workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy | undefined;
+      if (input.isolation === "sandbox" && !isRetryOfAcceptedDelegation) {
+        if (input.mode === "wait") {
+          return yield* failure(
+            "invalid_request",
+            "Sandbox isolation runs remotely and cannot block this turn. Use the default async mode.",
+          );
+        }
+        // The launch happens in the child's project, so the source project's
+        // provider allow-list is checked here instead of in dispatch.
+        yield* assertTargetEnabledForProject(parent, commandId, target);
+        // Fleet primitive: every delegated task gets its own disposable sandbox.
+        const workspaceId = stableSandboxWorkspaceId(scope, parent.thread.id, key);
+        const delegated = yield* cloudWorkspaces
+          .delegateSandboxTask(scope, {
+            task: taskPrompt(input),
+            modelSelection: target.modelSelection,
+            runtimeMode,
+            interactionMode,
+            ...(input.title === undefined ? {} : { title: input.title }),
+            branch: `sandbox/${workspaceId}`,
+            workspaceId,
+            runSetupScript: true,
+            ...(input.deleteOnCompletion === true ? { deleteOnCompletion: true } : {}),
+          })
+          .pipe(
+            Effect.mapError((cause) =>
+              failure("orchestration_error", `Unable to start the sandbox task: ${cause.message}`),
+            ),
+          );
+        return yield* readTask(scope, delegated.taskId, false, true);
+      }
       if (input.isolation === "worktree" && !isRetryOfAcceptedDelegation) {
         const project = yield* requireProject(parent.thread.projectId);
         const base = yield* gitDriver
@@ -3400,4 +3448,5 @@ export const layer: Layer.Layer<
   | SecretRequests.SecretRequests
   | ServerSettings.ServerSettingsService
   | RemoteDelegation.RemoteDelegation
+  | CloudSandboxWorkspaces.CloudSandboxWorkspaces
 > = Layer.effect(OrchestratorMcpService, make);

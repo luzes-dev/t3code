@@ -1,3 +1,7 @@
+import * as CloudSandboxManager from "./cloudSandbox/CloudSandboxManager.ts";
+import * as CloudSandboxProfiles from "./cloudSandbox/CloudSandboxProfiles.ts";
+import { CloudSandboxManagerError } from "./cloudSandbox/CloudSandboxStore.ts";
+import * as Schema from "effect/Schema";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -7,6 +11,8 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthSessionId,
+  ManagedCloudSandboxControlError,
+  ManagedCloudSandboxResourceId,
   AuthSourceControlWriteScope,
   EnvironmentId,
   EventId,
@@ -791,6 +797,16 @@ it.effect("shell snapshots omit idle children and older settled threads only on 
 
 // Build the production RPC layer; unrelated capabilities fail if this test calls them.
 const layerUnusedConfigRpcServices = Layer.mergeAll(
+  Layer.mock(CloudSandboxManager.CloudSandboxManager)({}),
+  Layer.mock(CloudSandboxProfiles.CloudSandboxProfiles)({
+    list: Effect.succeed([]),
+    save: () => Effect.die("not used"),
+    remove: () => Effect.die("not used"),
+    resolve: () => Effect.die("not used"),
+    recordSpend: () => Effect.die("not used"),
+    spendOf: () => Effect.die("not used"),
+    test: () => Effect.die("not used"),
+  }),
   Layer.mock(DocumentText.DocumentText)({}),
   Layer.mock(ServerSecretStore.ServerSecretStore)({}),
   Layer.mock(SecretCheck.SecretCheck)({}),
@@ -1845,6 +1861,88 @@ it.effect("a git action that fails partway still refreshes the repository status
     const exit = yield* Queue.take(exits);
     assert.deepEqual(Exit.isFailure(exit) ? Cause.squash(exit.cause) : exit, failure);
     assert.equal(yield* Deferred.await(refreshed), "/repo");
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.fresh(layerConfigSources),
+        Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+        Layer.mock(ServerBrowser.ServerBrowser)({}),
+      ),
+    ),
+    Effect.scoped,
+  ),
+);
+
+const isCloudSandboxControlError = Schema.is(ManagedCloudSandboxControlError);
+const encodeCloudSandboxControlError = Schema.encodeEffect(
+  Schema.toCodecJson(ManagedCloudSandboxControlError),
+);
+
+it.effect("cloud sandbox RPC failures exclude private provider defects", () =>
+  Effect.gen(function* () {
+    const exits = yield* Queue.unbounded<unknown>();
+    const services = Layer.mergeAll(
+      layerUnusedConfigRpcServices,
+      Layer.mock(CloudSandboxManager.CloudSandboxManager)({
+        execute: () =>
+          Effect.fail(
+            new CloudSandboxManagerError({
+              reason: "provider",
+              cause: new Error("https://provider.test/?token=private-provider-token"),
+            }),
+          ),
+      }),
+      Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+      Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+      Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+      Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/unused" }),
+      Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
+      Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+      Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+    );
+    const server = yield* RpcServer.makeNoSerialization(WsRpcGroup, {
+      ...WS_RPC_SERVER_OPTIONS,
+      onFromServer: (response) =>
+        response._tag === "Exit" && response.exit._tag === "Failure"
+          ? Queue.offer(exits, Cause.squash(response.exit.cause))
+          : Effect.void,
+    }).pipe(
+      Effect.provide(
+        layerWsRpc(
+          {
+            sessionId: AuthSessionId.make("cloud-test"),
+            subject: "cloud-test",
+            method: "browser-session-cookie",
+            scopes: [AuthOrchestrationOperateScope],
+          },
+          {},
+          yield* ServerBrowser.ServerBrowser,
+          () => Effect.void,
+          { secretReferences: true },
+        ).pipe(
+          Layer.provide(services),
+          Layer.merge(RpcAuthorization.layer([AuthOrchestrationOperateScope])),
+        ),
+      ),
+    );
+    yield* server.write(0, {
+      _tag: "Request",
+      id: RpcMessage.RequestId("cloud-control"),
+      tag: WS_METHODS.cloudSandboxControl,
+      payload: {
+        resourceId: ManagedCloudSandboxResourceId.make("test"),
+        operation: { _tag: "stop" },
+      },
+      headers: Headers.empty,
+    });
+    const error = yield* Queue.take(exits);
+    if (!isCloudSandboxControlError(error))
+      return yield* Effect.die("Expected a cloud control error.");
+    const encoded = yield* encodeCloudSandboxControlError(error);
+    assert.notInclude(JSON.stringify(encoded), "private-provider-token");
+    assert.notInclude(JSON.stringify(encoded), "https://provider.test");
   }).pipe(
     Effect.provide(
       Layer.mergeAll(

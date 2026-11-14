@@ -70,8 +70,11 @@ import {
   PreviewSnapshotToolkit,
   PreviewStandardToolkit,
 } from "./toolkits/preview/tools.ts";
+import * as SandboxHandlers from "./toolkits/sandbox/handlers.ts";
+import { ManagedSandboxToolkit } from "./toolkits/sandbox/tools.ts";
 import * as WorktreeHandlers from "./toolkits/worktree/handlers.ts";
 import { WorktreeToolkit } from "./toolkits/worktree/tools.ts";
+import { readManagedCloudSandboxContext } from "../cloudSandbox/ManagedCloudSandboxContext.ts";
 import * as WorktreeMcpService from "./WorktreeMcpService.ts";
 import * as PullRequestsHandlers from "./toolkits/pullRequests/handlers.ts";
 import * as ToolSearchHandlers from "./toolkits/toolSearch/handlers.ts";
@@ -1249,6 +1252,21 @@ const layerWorktreeToolkitRegistration = toolkitRegistration(
   WorktreeHandlers.layer,
 ).pipe(Layer.provide(WorktreeMcpService.layer));
 
+// Sandbox tools only make sense where this server is itself a managed cloud sandbox, which
+// is known at startup from the context file the controller writes before launching it.
+export const layerManagedSandboxToolkit = Layer.unwrap(
+  readManagedCloudSandboxContext.pipe(
+    Effect.orElseSucceed(() => Option.none()),
+    Effect.map((context) =>
+      Option.isSome(context)
+        ? toolkitRegistration(ManagedSandboxToolkit, SandboxHandlers.layer).pipe(
+            Layer.provide(WorktreeMcpService.layer),
+          )
+        : Layer.empty,
+    ),
+  ),
+);
+
 const layerPreviewControlsRegistration = toolkitRegistration(
   PreviewControlsToolkit,
   PreviewControlsHandlers.layer,
@@ -1326,6 +1344,7 @@ export const layerTools = Layer.mergeAll(
   layerEnvironmentToolkit,
   layerPreviewControlsRegistration,
   layerWorktreeToolkitRegistration,
+  layerManagedSandboxToolkit,
   layerPullRequestsToolkit,
   layerDeviceToolkit,
   layerHtmlToolkit,

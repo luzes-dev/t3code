@@ -1,0 +1,290 @@
+import {
+  type CloudSandboxProfileStatus,
+  type EnvironmentId,
+  type ManagedCloudSandboxControlOperation,
+  type ManagedCloudSandboxIssue,
+  type ManagedCloudSandboxResource,
+  type ManagedCloudSandboxResourceId,
+} from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import type { HttpClient } from "effect/http";
+import * as Result from "effect/Result";
+import * as Schedule from "effect/Schedule";
+import * as Stream from "effect/Stream";
+import { AsyncResult, Atom } from "effect/reactivity";
+
+import {
+  deleteManagedSandbox as deleteControllerSandbox,
+  listManagedSandboxes,
+} from "../connection/cloudSandbox.ts";
+import type { EnvironmentRegistry } from "../connection/registry.ts";
+import {
+  createRuntimeCommand,
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+  type AtomCommandResult,
+} from "./runtime.ts";
+
+const CLOUD_SANDBOX_PHASE_LABELS: Record<ManagedCloudSandboxResource["phase"], string> = {
+  allocating: "Starting",
+  connecting: "Connecting",
+  connected: "Running",
+  // Disconnect only stops routing; the VM keeps billing until something stops it.
+  disconnected: "Disconnected, billed until stop",
+  stopped: "Stopped",
+  deleting: "Deleting",
+  deleted: "Deleted",
+  failed: "Failed",
+};
+
+const usd = (amount: number) => (amount > 0 && amount < 0.01 ? "<$0.01" : `$${amount.toFixed(2)}`);
+
+/** Labels come from the provider's reported machines; unknown ids show as typed. */
+const machineLabel = (machines: CloudSandboxProfileStatus["machines"], id: string): string =>
+  machines?.find((machine) => machine.id === id)?.label ?? id.charAt(0).toUpperCase() + id.slice(1);
+
+export function describeCloudSandboxProfile(
+  { profile, spend, machines }: CloudSandboxProfileStatus,
+  running: number,
+): string {
+  const size =
+    profile.defaultSize === null ? "No default size" : machineLabel(machines, profile.defaultSize);
+  const autoStop =
+    profile.autoStopMinutes % 60 === 0
+      ? `${profile.autoStopMinutes / 60} h`
+      : `${profile.autoStopMinutes} min`;
+  const budget =
+    profile.monthlyBudgetUsd === null
+      ? "No budget limit"
+      : `${usd(spend?.usd ?? 0)} from deleted sandboxes of ${usd(profile.monthlyBudgetUsd)} this month`;
+  return [
+    size,
+    `Auto-stop ${autoStop}`,
+    budget,
+    `${running} running of ${profile.maxConcurrentSandboxes} allowed`,
+  ].join(" · ");
+}
+
+export function describeCloudSandbox(resource: ManagedCloudSandboxResource): string {
+  return [CLOUD_SANDBOX_PHASE_LABELS[resource.phase], resource.sandboxId]
+    .filter((part): part is string => part !== null)
+    .join(" · ");
+}
+
+export function countRunningCloudSandboxes(
+  resources: readonly ManagedCloudSandboxResource[],
+  profileId: CloudSandboxProfileStatus["profile"]["profileId"],
+): number {
+  return resources.filter(
+    (resource) =>
+      resource.profileId === profileId &&
+      resource.phase !== "stopped" &&
+      resource.phase !== "failed",
+  ).length;
+}
+
+/**
+ * Owner-derived selectability: a user-owned resource is an environment the
+ * user picked, while thread and task owned followers are the private compute
+ * of their controller host's delegated work. This view keeps followers out
+ * without removing them from controller administration.
+ */
+export function isSelectableEnvironment(resource: ManagedCloudSandboxResource): boolean {
+  return resource.owner._tag === "user";
+}
+
+/** Registered environment ids a picker may offer, derived from the record owner. */
+export function selectableEnvironmentIds(
+  resources: readonly ManagedCloudSandboxResource[],
+): ReadonlySet<EnvironmentId> {
+  const selectable = new Set<EnvironmentId>();
+  for (const resource of resources) {
+    if (resource.owner._tag === "user" && resource.environmentId !== null) {
+      selectable.add(resource.environmentId);
+    }
+  }
+  return selectable;
+}
+
+/** One collapsed warning for every degraded follower of one cloud profile. */
+export interface ManagedCloudSandboxIssueRollup {
+  readonly key: string;
+  readonly cause: ManagedCloudSandboxIssue["cause"];
+  readonly driverKind: string;
+  readonly profileId: string;
+  readonly message: string;
+  readonly firstSeenAt: string;
+  readonly affectedResourceIds: readonly ManagedCloudSandboxResourceId[];
+}
+
+const MANAGED_SANDBOX_ISSUE_CAUSE_LABELS: Record<ManagedCloudSandboxIssue["cause"], string> = {
+  "provider-auth": "Cloud token refused",
+  connectivity: "Connection lost",
+  bind: "Ownership not bound",
+  allocation: "Allocation refused",
+};
+
+/** One line a task card or admin row shows for a degraded follower sandbox. */
+export function describeManagedCloudSandboxIssue(issue: ManagedCloudSandboxIssue): string {
+  return `${MANAGED_SANDBOX_ISSUE_CAUSE_LABELS[issue.cause]}: ${issue.message}`;
+}
+
+export function managedSandboxIssueRecovery(cause: ManagedCloudSandboxIssue["cause"]): string {
+  switch (cause) {
+    case "provider-auth":
+      return "Edit this cloud profile below to replace its API key.";
+    case "connectivity":
+      return "Check the sandbox's network and SSH access. The controller retries automatically.";
+    case "bind":
+      return "The controller could not bind this sandbox to its task. Check the owning task before deleting it.";
+    case "allocation":
+      return "Check this cloud profile's budget, capacity and provider availability before retrying.";
+  }
+}
+
+/** The cause a warning collapses on: one dead profile token is one warning. */
+export function managedSandboxIssueRollup(
+  resources: readonly ManagedCloudSandboxResource[],
+): readonly ManagedCloudSandboxIssueRollup[] {
+  const groups = new Map<string, ManagedCloudSandboxIssueRollup>();
+  for (const resource of resources) {
+    // The collapse is of followers' emission; a user-owned sandbox's own
+    // rows already speak for themselves, and the issue is absent when healthy.
+    if (resource.owner._tag === "user" || resource.issue === undefined) continue;
+    const { driverKind, profileId, cause, message, firstSeenAt } = resource.issue;
+    const key = `${driverKind}:${profileId}:${cause}`;
+    const existing = groups.get(key);
+    if (existing === undefined) {
+      groups.set(key, {
+        key,
+        cause,
+        driverKind,
+        profileId,
+        message,
+        firstSeenAt,
+        affectedResourceIds: [resource.resourceId],
+      });
+      continue;
+    }
+    groups.set(key, {
+      ...existing,
+      firstSeenAt: firstSeenAt < existing.firstSeenAt ? firstSeenAt : existing.firstSeenAt,
+      affectedResourceIds: [...existing.affectedResourceIds, resource.resourceId],
+    });
+  }
+  return [...groups.values()].sort((left, right) =>
+    right.firstSeenAt.localeCompare(left.firstSeenAt),
+  );
+}
+
+/** Stop and resume are offered only in these phases; resume for a stopped sandbox. */
+export function offersCloudSandboxControl(phase: ManagedCloudSandboxResource["phase"]): boolean {
+  return (
+    phase === "connected" ||
+    phase === "connecting" ||
+    phase === "disconnected" ||
+    phase === "stopped"
+  );
+}
+
+export function cloudSandboxControlOperation(
+  resource: ManagedCloudSandboxResource,
+): ManagedCloudSandboxControlOperation {
+  return resource.phase === "stopped" ? { _tag: "resume" } : { _tag: "stop" };
+}
+
+export interface SandboxProfileLimits {
+  readonly monthlyBudgetUsd: number | null;
+  readonly maxConcurrentSandboxes: number;
+  readonly template: string | null;
+}
+
+const DECIMAL_PATTERN = /^(\d+\.?\d*|\.\d+)$/u;
+
+/** Checks what a profile form typed before it reaches the server, which enforces the same ranges. */
+export function parseSandboxProfileLimits(input: {
+  readonly monthlyBudgetUsd: string;
+  readonly maxConcurrentSandboxes: number;
+  readonly template: string;
+}): Result.Result<SandboxProfileLimits, string> {
+  const budgetText = input.monthlyBudgetUsd.trim();
+  const budget = budgetText === "" ? null : Number(budgetText);
+  if (budget !== null && (!DECIMAL_PATTERN.test(budgetText) || !(budget > 0))) {
+    return Result.fail("Monthly budget must be a dollar amount above 0, or blank for no limit.");
+  }
+  if (
+    !Number.isInteger(input.maxConcurrentSandboxes) ||
+    input.maxConcurrentSandboxes < 1 ||
+    input.maxConcurrentSandboxes > 100
+  ) {
+    return Result.fail("Concurrent sandboxes must be a whole number from 1 to 100.");
+  }
+  const template = input.template.trim();
+  return Result.succeed({
+    monthlyBudgetUsd: budget,
+    maxConcurrentSandboxes: input.maxConcurrentSandboxes,
+    template: template === "" ? null : template,
+  });
+}
+
+/** Null when the command succeeded or was interrupted, so the caller can clear the error. */
+export function cloudSandboxFailureMessage<A, E>(
+  result: AtomCommandResult<A, E>,
+  fallback: string,
+): string | null {
+  if (result._tag !== "Failure" || isAtomCommandInterrupted(result)) return null;
+  const error: unknown = squashAtomCommandFailure(result);
+  if (typeof error === "object" && error !== null && "detail" in error) {
+    if (typeof error.detail === "string") return error.detail;
+  }
+  return error instanceof Error ? error.message : fallback;
+}
+
+/**
+ * Every managed sandbox a controller reports, polled every 30 seconds while subscribed. The
+ * polling stops when the last subscriber leaves, and deleted resources are left out.
+ */
+export function createManagedSandboxAtoms<R, E>(
+  runtime: Atom.AtomRuntime<EnvironmentRegistry | HttpClient.HttpClient | R, E>,
+) {
+  const list = Atom.family((controllerEnvironmentId: EnvironmentId) =>
+    runtime
+      .atom(
+        Stream.fromEffect(
+          listManagedSandboxes(controllerEnvironmentId).pipe(
+            Effect.tapError((error) =>
+              Effect.logWarning("Managed cloud sandbox list failed", error),
+            ),
+            Effect.map((resources): readonly ManagedCloudSandboxResource[] =>
+              resources.filter((resource) => resource.phase !== "deleted"),
+            ),
+            Effect.orElseSucceed((): readonly ManagedCloudSandboxResource[] => []),
+          ),
+        ).pipe(Stream.repeat(Schedule.spaced("30 seconds"))),
+      )
+      .pipe(Atom.setIdleTTL(0)),
+  );
+  // This owner-derived view is separate from the controller administration list.
+  const selectable = Atom.family((controllerEnvironmentId: EnvironmentId) =>
+    Atom.map(list(controllerEnvironmentId), (result) =>
+      AsyncResult.map(result, (resources) => resources.filter(isSelectableEnvironment)),
+    ),
+  );
+  // Degraded followers, collapsed per cause: one warning naming one fix (the
+  // profile's login on this controller) instead of one row per broken sandbox.
+  const issues = Atom.family((controllerEnvironmentId: EnvironmentId) =>
+    Atom.map(list(controllerEnvironmentId), (result) =>
+      AsyncResult.map(result, managedSandboxIssueRollup),
+    ),
+  );
+  const remove = createRuntimeCommand(runtime, {
+    label: "environment-data:cloud-sandbox:delete-managed",
+    execute: Effect.fn("clientRuntime.cloudSandbox.deleteManagedSandboxCommand")(function* (input: {
+      readonly controllerEnvironmentId: EnvironmentId;
+      readonly resourceId: ManagedCloudSandboxResourceId;
+    }) {
+      return yield* deleteControllerSandbox(input.controllerEnvironmentId, input.resourceId);
+    }),
+  });
+  return { list, selectable, issues, remove };
+}

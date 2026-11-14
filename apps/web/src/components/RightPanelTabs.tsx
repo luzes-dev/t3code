@@ -1,3 +1,4 @@
+import { CloudSandboxMenuItem } from "./desktop/CloudSandboxMenuItem";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
@@ -46,6 +47,7 @@ import {
   MessagesSquare,
   Plus,
   TerminalSquare,
+  Tv,
   Volume2Icon,
   VolumeOffIcon,
 } from "lucide-react";
@@ -143,6 +145,7 @@ export interface RightPanelTabsProps {
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
   onAddDevice: () => void;
+  onAddCloudDesktop?: () => void;
   /** Absent where side chats are not offered. */
   onAddSideChat?: (() => void) | undefined;
   browserAvailable: boolean;
@@ -594,6 +597,8 @@ function surfaceTitle(
       return "Pull requests";
     case "device":
       return surface.title ?? surface.target?.name ?? "Device";
+    case "cloud-desktop":
+      return "Cloud Desktop";
     case "side-chat":
       return "Side chat";
     case "preview": {
@@ -694,6 +699,8 @@ function SurfaceIcon({
       ) : (
         <Smartphone className="size-3 shrink-0" />
       );
+    case "cloud-desktop":
+      return <Tv className="size-3 shrink-0" />;
   }
 }
 
@@ -1426,6 +1433,12 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                   sideOffset={6}
                   onKeyDownCapture={handleAddSurfaceMenuKeyDown}
                 >
+                  {props.onAddCloudDesktop ? (
+                    <CloudSandboxMenuItem
+                      environmentId={props.environmentId}
+                      onOpen={props.onAddCloudDesktop}
+                    />
+                  ) : null}
                   {addSurfaceActions.map((action) => {
                     const Icon = action.icon;
                     if (action.label === "Browser" && action.available) {
