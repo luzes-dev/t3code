@@ -26,6 +26,11 @@ const isCloudSandboxError = Schema.is(CloudSandboxError);
 
 export const toError = (cause: unknown) => {
   if (isManagerError(cause)) return cause;
+  if (
+    isCloudSandboxError(cause) &&
+    (cause.reason === "authentication" || cause.reason === "permission")
+  )
+    return new Store.CloudSandboxManagerError({ reason: "provider-auth", cause });
   const rateLimit =
     isCloudSandboxError(cause) && cause.rateLimit !== undefined ? cause.rateLimit : undefined;
   return rateLimit === undefined
@@ -36,7 +41,12 @@ export const toError = (cause: unknown) => {
 /** Profile lookup failures read as provisioning failures to workspace callers. */
 export const toManagerError = (cause: CloudSandboxProfileError) =>
   new Store.CloudSandboxManagerError({
-    reason: cause.reason === "budget" ? "budget" : "provider",
+    reason:
+      cause.reason === "budget"
+        ? "budget"
+        : cause.reason === "missing-key"
+          ? "provider-auth"
+          : "provider",
     cause,
   });
 
@@ -92,7 +102,7 @@ export const stampConnectIssue = Effect.fn("ManagerRuntime.stampConnectIssue")(f
     cause:
       error.reason === "transport" || error.reason === "not-found"
         ? "connectivity"
-        : error.reason === "provider"
+        : error.reason === "provider-auth"
           ? "provider-auth"
           : "allocation",
     driverKind: found.value.driverKind,
@@ -169,6 +179,8 @@ export const makeManagerRuntime = Effect.fn("CloudSandboxManager.makeRuntime")(f
   const publicResource = (record: Store.CloudSandboxRecord): ManagedCloudSandboxResource => {
     const {
       selection: _selection,
+      initialSelection: _initialSelection,
+      allocationOwnership: _allocationOwnership,
       reservation: _reservation,
       snapshotName: _snapshotName,
       snapshotReady: _snapshotReady,

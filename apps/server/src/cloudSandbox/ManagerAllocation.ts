@@ -3,12 +3,11 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { cloudSandboxSupportsMachine } from "@t3tools/cloud-sandbox";
 import {
   ManagedCloudSandboxProvisionInput,
   legacyOwner,
   legacyRetention,
-  type CloudSandboxProfile,
+  type EnvironmentId,
   type ManagedCloudSandboxForkInput,
   type ManagedCloudSandboxResourceId,
 } from "@t3tools/contracts";
@@ -20,14 +19,18 @@ import {
   type ManagerRuntime,
 } from "./ManagerRuntime.ts";
 import type { ManagerConnections } from "./ManagerConnections.ts";
+import type { ManagerReservations } from "./ManagerReservations.ts";
 
-export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnections) => {
+export const makeAllocation = (
+  rt: ManagerRuntime,
+  connections: ManagerConnections,
+  reservations: ManagerReservations,
+) => {
   const {
     store,
     secrets,
     profiles,
     transport,
-    httpClient,
     controllerEnvironmentId,
     locks,
     routes,
@@ -35,141 +38,46 @@ export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnectio
     resolveProfile,
     driverFor,
     stopWorker,
-    drivers,
   } = rt;
   const { connectUnlocked, connectRecord } = connections;
-  const reserveAllocation = Effect.fn("CloudSandboxManager.reserveAllocation")(function* (
-    profile: CloudSandboxProfile,
-    size: string | undefined,
-    autoStopMinutes: number,
-    record: Store.CloudSandboxRecord,
-  ) {
-    const { apiKey } = yield* resolveProfile(profile.profileId);
-    const driver = yield* drivers
-      .create(profile.driverKind, {
-        apiKey,
-        httpClient,
-      })
-      .pipe(Effect.mapError(toError));
-    // The selected provider owns machine validation; a reported list catches
-    // invalid sizes before any save or snapshot capture.
-    if (!cloudSandboxSupportsMachine(driver, size ?? "default"))
-      return yield* new Store.CloudSandboxManagerError({
-        reason: "provider",
-        cause: new Error(`The provider does not offer this machine type (${size ?? "default"}).`),
-      });
-    const rateUsdPerHour = (requestSize: string | undefined): number | null => {
-      const rate = driver.pricing?.hourlyUsd(requestSize ?? "default");
-      return rate !== null && rate !== undefined && Number.isFinite(rate) && rate >= 0
-        ? rate
-        : null;
-    };
-    let reservationSize = size ?? "default";
-    // A lost resize response can leave either size billable until observation succeeds.
-    for (const candidate of [record.selection.size, record.reservation?.size]) {
-      if (candidate === undefined) continue;
-      const rate = rateUsdPerHour(candidate);
-      const reservedRate = rateUsdPerHour(reservationSize);
-      if (rate === null || (reservedRate !== null && rate > reservedRate))
-        reservationSize = candidate;
-    }
-    return yield* locks.withLock(
-      `profile:${profile.profileId}`,
-      Effect.gen(function* () {
-        const live = (yield* store.list).filter(
-          (candidate) => candidate.profileId === profile.profileId && Store.isLiveRecord(candidate),
-        );
-        const running = live.filter(
-          (candidate) =>
-            candidate.power === "running" && candidate.resourceId !== record.resourceId,
-        );
-        if (running.length >= profile.maxConcurrentSandboxes)
-          return yield* new Store.CloudSandboxManagerError({ reason: "concurrency" });
-        if (profile.monthlyBudgetUsd !== null) {
-          // An unpriced machine counts as unknown cost, never free: admission is refused.
-          const reservationUsd = (
-            requestSize: string | undefined,
-            minutes: number,
-          ): number | null => {
-            const rate = rateUsdPerHour(requestSize);
-            return rate === null ? null : (rate * minutes) / 60;
-          };
-          const spend = yield* profiles
-            .spendOf(profile.profileId)
-            .pipe(Effect.mapError(toManagerError));
-          if (spend !== null && !Number.isFinite(spend.usd))
-            return yield* new Store.CloudSandboxManagerError({ reason: "budget" });
-          const requestedUsd = reservationUsd(reservationSize, autoStopMinutes);
-          if (requestedUsd === null)
-            return yield* new Store.CloudSandboxManagerError({
-              reason: "budget",
-              cause: new Error(
-                `The provider does not report a price for this machine (${size ?? "default"}).`,
-              ),
-            });
-          let committed = spend?.usd ?? 0;
-          for (const candidate of live) {
-            const selectedUsd = reservationUsd(
-              candidate.selection.size,
-              candidate.selection.autoStopMinutes,
-            );
-            const reservedUsd =
-              candidate.power === "running" && candidate.reservation !== undefined
-                ? reservationUsd(candidate.reservation.size, candidate.reservation.autoStopMinutes)
-                : 0;
-            if (selectedUsd === null || reservedUsd === null)
-              return yield* new Store.CloudSandboxManagerError({ reason: "budget" });
-            const fallback = Math.max(selectedUsd, reservedUsd);
-            const knownUsd =
-              candidate.sandboxId !== null && driver.usage
-                ? yield* driver.usage.getUsage(candidate.sandboxId).pipe(
-                    Effect.map((usage) => usage.listValueUsd),
-                    Effect.orElseSucceed(() => fallback),
-                  )
-                : fallback;
-            if (knownUsd === null || !Number.isFinite(knownUsd))
-              return yield* new Store.CloudSandboxManagerError({
-                reason: "budget",
-                cause: new Error("The running cost of an existing sandbox cannot be confirmed."),
-              });
-            committed += candidate.power === "running" ? Math.max(knownUsd, fallback) : knownUsd;
-          }
-          const total = committed + requestedUsd;
-          if (total > profile.monthlyBudgetUsd)
-            return yield* new Store.CloudSandboxManagerError({ reason: "budget" });
-        }
-        const reserved = {
-          ...record,
-          reservation: {
-            size: reservationSize,
-            autoStopMinutes: Math.ceil(
-              Math.max(autoStopMinutes, record.reservation?.autoStopMinutes ?? 0),
-            ),
-          },
-        };
-        yield* store.save(reserved);
-        return reserved;
-      }),
-    );
-  });
+  const { reserveAllocation, reserveResume } = reservations;
 
-  // A stopped record holds no running slot, so starting it again passes the same limits.
-  const reserveResume = Effect.fn("CloudSandboxManager.reserveResume")(function* (
-    record: Store.CloudSandboxRecord,
-  ) {
-    if (record.lifecycle !== "active" || record.power !== "stopped") return;
-    const { profile } = yield* resolveProfile(record.profileId);
-    yield* reserveAllocation(
-      profile,
-      record.selection.size,
-      Math.max(record.selection.autoStopMinutes, record.reservation?.autoStopMinutes ?? 0),
-      {
+  const recoverAllocationOwnership = Effect.fn("CloudSandboxManager.recoverAllocationOwnership")(
+    function* (
+      record: Store.CloudSandboxRecord,
+      ownership: ManagedCloudSandboxProvisionInput["ownership"],
+      hostEnvironmentId: EnvironmentId,
+    ) {
+      if (record.allocationOwnership !== undefined) {
+        if (
+          record.allocationOwnership.sourceThreadId !== ownership?.sourceThreadId ||
+          record.allocationOwnership.retention !== ownership?.retention
+        )
+          return yield* new Store.CloudSandboxManagerError({ reason: "conflict" });
+        return record;
+      }
+      if (ownership === undefined) return record;
+      const owner = record.owner;
+      if (
+        owner._tag !== "user" &&
+        (owner.hostEnvironmentId !== hostEnvironmentId ||
+          (owner._tag === "thread" ? owner.threadId : owner.sourceThreadId) !==
+            ownership.sourceThreadId)
+      )
+        return yield* new Store.CloudSandboxManagerError({ reason: "ownership" });
+      const recovered: Store.CloudSandboxRecord = {
         ...record,
-        power: "running",
-        intent: "connected",
-      },
-    );
-  });
+        allocationOwnership: ownership,
+        owner:
+          owner._tag === "user"
+            ? { _tag: "thread", hostEnvironmentId, threadId: ownership.sourceThreadId }
+            : owner,
+        retention: owner._tag === "user" ? ownership.retention : record.retention,
+      };
+      yield* store.save(recovered);
+      return recovered;
+    },
+  );
 
   const provision = Effect.fn("CloudSandboxManager.provision")(function* (
     input: ManagedCloudSandboxProvisionInput,
@@ -183,7 +91,7 @@ export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnectio
         if (Option.isSome(existing)) {
           if (
             !Schema.toEquivalence(ManagedCloudSandboxProvisionInput.fields.sandbox)(
-              existing.value.selection,
+              existing.value.initialSelection ?? existing.value.selection,
               input.sandbox,
             ) ||
             existing.value.driverKind !== profile.driverKind ||
@@ -192,12 +100,17 @@ export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnectio
             return yield* new Store.CloudSandboxManagerError({ reason: "conflict" });
           if (isDeletedOrDeleting(existing.value))
             return yield* new Store.CloudSandboxManagerError({ reason: "conflict" });
-          if (existing.value.lifecycle !== "failed") {
-            yield* reserveResume(existing.value);
+          record = yield* recoverAllocationOwnership(
+            existing.value,
+            input.ownership,
+            controllerEnvironmentId,
+          );
+          if (record.lifecycle !== "failed") {
+            yield* reserveResume(record);
             const route = yield* connectUnlocked(input.operationId, true);
             return { ...route, pairingToken: yield* transport.pairingToken(input.operationId) };
           }
-          record = { ...existing.value, lifecycle: "allocating" };
+          record = { ...record, lifecycle: "allocating" };
         } else {
           record = {
             resourceId: input.operationId,
@@ -206,16 +119,23 @@ export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnectio
             profileId: input.profile,
             sandboxId: null,
             parentResourceId: null,
-            // Fresh resources start user-owned; delegated followers are bound
-            // to their task/thread owner after the child task exists.
-            owner: legacyOwner(),
-            retention: legacyRetention(),
+            owner:
+              input.ownership === undefined
+                ? legacyOwner()
+                : {
+                    _tag: "thread",
+                    hostEnvironmentId: controllerEnvironmentId,
+                    threadId: input.ownership.sourceThreadId,
+                  },
+            retention: input.ownership?.retention ?? legacyRetention(),
             lifecycle: "allocating",
             power: "running",
             intent: "connected",
             environmentId: null,
             label: input.sandbox.name,
             selection: input.sandbox,
+            initialSelection: input.sandbox,
+            ...(input.ownership === undefined ? {} : { allocationOwnership: input.ownership }),
             snapshotName: null,
             snapshotReady: false,
             deletionOperationId: null,
@@ -237,25 +157,32 @@ export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnectio
 
   const forkUnlocked = Effect.fn("CloudSandboxManager.fork")(function* (
     input: ManagedCloudSandboxForkInput,
-    options?: { readonly inheritOwner?: boolean },
+    options?: { readonly inheritOwner?: boolean; readonly hostEnvironmentId?: EnvironmentId },
   ) {
     return yield* Effect.gen(function* () {
       const source = yield* requireRecord(input.sourceResourceId);
       if (isDeletedOrDeleting(source))
         return yield* new Store.CloudSandboxManagerError({ reason: "conflict" });
-      const existing = yield* store.get(input.operationId);
+      let existing = yield* store.get(input.operationId);
       if (Option.isSome(existing)) {
+        const selection = existing.value.initialSelection ?? existing.value.selection;
         if (
           existing.value.parentResourceId !== input.sourceResourceId ||
-          existing.value.selection.name !== input.name ||
-          existing.value.selection.size !== (input.size ?? "small") ||
-          existing.value.selection.autoStopMinutes !== (input.autoStopMinutes ?? 15)
+          selection.name !== input.name ||
+          selection.size !== (input.size ?? "small") ||
+          selection.autoStopMinutes !== (input.autoStopMinutes ?? 15)
         )
           return yield* new Store.CloudSandboxManagerError({ reason: "conflict" });
         if (isDeletedOrDeleting(existing.value))
           return yield* new Store.CloudSandboxManagerError({ reason: "conflict" });
-        if (existing.value.lifecycle !== "failed") {
-          yield* reserveResume(existing.value);
+        const recovered = yield* recoverAllocationOwnership(
+          existing.value,
+          input.ownership,
+          options?.hostEnvironmentId ?? controllerEnvironmentId,
+        );
+        existing = Option.some(recovered);
+        if (recovered.lifecycle !== "failed") {
+          yield* reserveResume(recovered);
           return yield* connectUnlocked(input.operationId, true);
         }
       }
@@ -266,6 +193,13 @@ export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnectio
       const name = `t3-${input.operationId}`;
       const size = input.size ?? "small";
       const autoStopMinutes = input.autoStopMinutes ?? 15;
+      const selection = {
+        requestId: input.operationId,
+        template: name,
+        name: input.name,
+        size,
+        autoStopMinutes,
+      };
       const record: Store.CloudSandboxRecord = Option.isSome(existing)
         ? { ...existing.value, lifecycle: "allocating" }
         : {
@@ -275,22 +209,27 @@ export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnectio
             profileId: source.profileId,
             sandboxId: null,
             parentResourceId: source.resourceId,
-            // A root-initiated fork inherits its source's ownership; a
-            // child-initiated fork starts unbound and is bound to its task.
-            owner: options?.inheritOwner === false ? legacyOwner() : source.owner,
-            retention: options?.inheritOwner === false ? legacyRetention() : source.retention,
+            owner:
+              input.ownership === undefined
+                ? options?.inheritOwner === false
+                  ? legacyOwner()
+                  : source.owner
+                : {
+                    _tag: "thread",
+                    hostEnvironmentId: options?.hostEnvironmentId ?? controllerEnvironmentId,
+                    threadId: input.ownership.sourceThreadId,
+                  },
+            retention:
+              input.ownership?.retention ??
+              (options?.inheritOwner === false ? legacyRetention() : source.retention),
             lifecycle: "allocating",
             power: "running",
             intent: "connected",
             environmentId: null,
             label: input.name,
-            selection: {
-              requestId: input.operationId,
-              template: name,
-              name: input.name,
-              size,
-              autoStopMinutes,
-            },
+            selection,
+            initialSelection: selection,
+            ...(input.ownership === undefined ? {} : { allocationOwnership: input.ownership }),
             snapshotName: name,
             snapshotReady: false,
             deletionOperationId: null,
@@ -305,7 +244,7 @@ export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnectio
 
   const fork = Effect.fn("CloudSandboxManager.forkLocked")((
     input: ManagedCloudSandboxForkInput,
-    options?: { readonly inheritOwner?: boolean },
+    options?: { readonly inheritOwner?: boolean; readonly hostEnvironmentId?: EnvironmentId },
   ) => {
     if (input.sourceResourceId === input.operationId)
       return Effect.fail(new Store.CloudSandboxManagerError({ reason: "conflict" }));
@@ -438,7 +377,7 @@ export const makeAllocation = (rt: ManagerRuntime, connections: ManagerConnectio
       .pipe(Effect.mapError(toError));
   });
 
-  return { reserveAllocation, reserveResume, provision, fork, release };
+  return { provision, fork, release };
 };
 
 export type ManagerAllocation = ReturnType<typeof makeAllocation>;

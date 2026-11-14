@@ -9,7 +9,7 @@ import { HttpClient } from "effect/http";
 import * as RemoteAuthorization from "../authorization/service.ts";
 import { environmentEndpointUrl } from "../environment/endpoint.ts";
 import * as ManagedRelay from "../relay/managedRelay.ts";
-import { executeAuthenticatedEnvironmentHttpRequest } from "../state/environmentHttpAuth.ts";
+import { executeAuthenticatedEnvironmentHttpRequest } from "../state/environmentHttpRequest.ts";
 import {
   RemoteEnvironmentAuthUndeclaredStatusError,
   type RemoteEnvironmentRequestError,
@@ -106,6 +106,7 @@ export const openCloudSandboxPreview = Effect.fn("clientRuntime.cloudSandbox.ope
     url: string,
     access: "local" | "protected" = "protected",
     close = false,
+    leaseId?: string,
   ) {
     const signer = yield* Effect.serviceOption(ManagedRelay.ManagedRelayDpopSigner);
     const remoteAuthorization = yield* Effect.serviceOption(
@@ -120,7 +121,16 @@ export const openCloudSandboxPreview = Effect.fn("clientRuntime.cloudSandbox.ope
       url: (urls) => urls.preview(),
       timeoutMs: 180_000,
       request: ({ client, headers }) =>
-        client.preview({ headers, payload: { resourceId, url, access, close } }),
+        client.preview({
+          headers,
+          payload: {
+            resourceId,
+            url,
+            access,
+            close,
+            ...(leaseId === undefined ? {} : { leaseId }),
+          },
+        }),
     });
   },
 );

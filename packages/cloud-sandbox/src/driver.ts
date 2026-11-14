@@ -79,11 +79,11 @@ export interface StreamableSandbox {
     theme?: "dark" | "light",
   ) => Effect.Effect<SandboxDesktopStreamSession, CloudSandboxError>;
 }
-export interface KeepaliveSandbox {
+export interface KeepaliveSandbox<E = CloudSandboxError> {
   readonly extendAutoStop: (
     sandboxId: string,
     hours: number,
-  ) => Effect.Effect<CloudSandboxDetails, CloudSandboxError>;
+  ) => Effect.Effect<CloudSandboxDetails, E>;
 }
 export interface HostableSandbox {
   readonly protectedAccess: boolean;

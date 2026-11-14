@@ -170,6 +170,7 @@ export const openEnvironmentSandboxPreview = Effect.fn(
   url: string,
   access: "local" | "protected",
   close = false,
+  leaseId?: string,
 ) {
   const found = yield* scanForSandbox(environmentId);
   if (found === null) return yield* configuration("This environment has no managed cloud sandbox.");
@@ -179,5 +180,6 @@ export const openEnvironmentSandboxPreview = Effect.fn(
     url,
     access,
     close,
+    leaseId,
   );
 });

@@ -16,6 +16,12 @@ import { useClosedViewStore } from "~/closedViewStore";
 
 import { closePreviewSession } from "./closePreviewSession";
 
+vi.mock("~/browser/browserTargetResolver", () => ({
+  releasePreviewExternalServerUrl: async () => {},
+  resolveServerOwnedUrl: (_environmentId: unknown, url: string) =>
+    url === "http://127.0.0.1:47124/app" ? "http://localhost:3000/" : url,
+}));
+
 const threadRef = {
   environmentId: "local" as ScopedThreadRef["environmentId"],
   threadId: "thread-1" as ScopedThreadRef["threadId"],
@@ -26,7 +32,7 @@ const snapshot: PreviewSessionSnapshot = {
   tabId: "tab-1",
   navStatus: {
     _tag: "Success",
-    url: "http://localhost:3000/",
+    url: "http://127.0.0.1:47124/app",
     title: "Local app",
   },
   canGoBack: false,
@@ -65,7 +71,14 @@ describe("closePreviewSession", () => {
     finishClose?.();
     await closing;
     expect(useClosedViewStore.getState().entries).toMatchObject([
-      { kind: "browser", threadRef, snapshot },
+      {
+        kind: "browser",
+        threadRef,
+        snapshot: {
+          ...snapshot,
+          navStatus: { ...snapshot.navStatus, url: "http://localhost:3000/" },
+        },
+      },
     ]);
     expect(closePreview).toHaveBeenCalledWith({ threadId: "thread-1", tabId: "tab-1" });
   });

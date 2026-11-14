@@ -285,6 +285,13 @@ it.effect("keeps public connect from waking a stopped VM", () =>
     });
     yield* manager.disconnect(id);
     f.setState("stopped");
+    f.setBudget(0);
+    expect(yield* manager.execute(id, { _tag: "resume" }).pipe(Effect.result)).toMatchObject({
+      _tag: "Failure",
+      failure: { reason: "budget" },
+    });
+    expect(f.resumes()).toBe(0);
+    f.setBudget(null);
     expect(yield* manager.connect(id).pipe(Effect.result)).toMatchObject({
       _tag: "Failure",
       failure: { reason: "transport" },
@@ -446,7 +453,16 @@ it.effect("a source connect queued behind a child stop re-checks the profile's l
       ...f.records.get(source)!,
       resourceId: child,
       parentResourceId: source,
+      sandboxId: "bx_queue_child",
     });
+    f.setResponse((url, method) =>
+      method === "GET" && url.endsWith("/sandboxes/bx_23456789")
+        ? Response.json({
+            ok: true,
+            sandbox: { id: "bx_23456789", name: "source", state: "ready", type: "small" },
+          })
+        : undefined,
+    );
     const entered = yield* Deferred.make<void>();
     const release = yield* Deferred.make<void>();
     f.setBeforeRequest((url) =>
@@ -669,11 +685,19 @@ it.effect(
       });
       yield* Queue.take(probes);
       expect(f.extensionTtls()).toEqual([3600]);
+      expect(f.records.get(shortId)?.reservation?.autoStopMinutes).toBe(60);
       for (let minute = 0; minute < 7; minute++) {
         yield* TestClock.adjust("1 minute");
         yield* Queue.take(probes);
       }
       expect(f.extensionTtls()).toEqual([3600, 3600]);
+      f.setBudget(0);
+      for (let minute = 0; minute < 7; minute++) {
+        yield* TestClock.adjust("1 minute");
+        yield* Queue.take(probes);
+      }
+      expect(f.extensionTtls()).toEqual([3600, 3600]);
+      f.setBudget(null);
       yield* manager.disconnect(shortId);
 
       const longId = ManagedCloudSandboxResourceId.make("long-ttl");
@@ -738,6 +762,7 @@ it.effect.each(["missing", "saving", "ready", "ambiguous"] as const)(
       });
       const child = ManagedCloudSandboxResourceId.make("snapshot-child");
       const name = `t3-${child}`;
+      const selection = { template: name, name: "child", size: "small", autoStopMinutes: 15 };
       f.records.set(child, {
         ...f.records.get(source)!,
         resourceId: child,
@@ -747,12 +772,8 @@ it.effect.each(["missing", "saving", "ready", "ambiguous"] as const)(
         lifecycle: "allocating",
         snapshotName: name,
         snapshotReady: false,
-        selection: {
-          template: name,
-          name: "child",
-          size: "small",
-          autoStopMinutes: 15,
-        },
+        selection,
+        initialSelection: selection,
       });
       let captures = 0;
       let reads = 0;
@@ -1046,11 +1067,12 @@ it.effect("retains the explicit lifetime reservation through a later resize", ()
     f.setDriverKind("custom");
     const manager = yield* f.manager;
     const id = ManagedCloudSandboxResourceId.make("extended-resize");
-    yield* manager.provision({
+    const input = {
       operationId: id,
       profile: SandboxProfileId.make("fixture"),
       sandbox: { name: "long-running", size: "m-standard", autoStopMinutes: 15 },
-    });
+    };
+    yield* manager.provision(input);
     yield* manager.execute(id, { _tag: "extend", hours: 10 });
     f.setBudget(1);
     expect(
@@ -1060,6 +1082,7 @@ it.effect("retains the explicit lifetime reservation through a later resize", ()
     yield* manager.execute(id, { _tag: "resize", size: "m-large" });
     expect(f.records.get(id)?.reservation).toEqual({ size: "m-large", autoStopMinutes: 600 });
     expect(yield* manager.get(id)).not.toHaveProperty("reservation");
+    expect((yield* manager.provision(input)).connection.resourceId).toBe(id);
     f.setBudget(2);
     expect(
       yield* manager
@@ -1236,6 +1259,47 @@ it.effect("refuses new allocations past the profile's concurrent sandbox limit",
       failure: { reason: "concurrency" },
     });
     expect(f.records.get(capOne)).toMatchObject({ power: "stopped" });
+  }).pipe(Effect.scoped),
+);
+
+it.effect("keeps an asynchronously stopping VM reserved until its provider confirms the stop", () =>
+  Effect.gen(function* () {
+    const base = makeTestCloudSandboxDriver();
+    const driver: BaseCloudSandboxDriver = {
+      ...base.driver,
+      stop: (id) =>
+        base.driver
+          .stop(id)
+          .pipe(Effect.map((sandbox) => ({ ...sandbox, state: "stopping" as const }))),
+    };
+    const f = fixture(
+      false,
+      Effect.void,
+      { active: false },
+      { create: () => Effect.succeed(driver) },
+    );
+    f.setDriverKind("custom");
+    f.setMaxConcurrent(1);
+    const manager = yield* f.manager;
+    const id = ManagedCloudSandboxResourceId.make("stopping-slot");
+    yield* manager.provision({
+      operationId: id,
+      profile: SandboxProfileId.make("fixture"),
+      sandbox: { name: "first", size: "m-standard", autoStopMinutes: 15 },
+    });
+    yield* manager.execute(id, { _tag: "stop" });
+    const next = {
+      operationId: ManagedCloudSandboxResourceId.make("next-slot"),
+      profile: SandboxProfileId.make("fixture"),
+      sandbox: { name: "next", size: "m-standard", autoStopMinutes: 15 },
+    };
+    expect(yield* manager.provision(next).pipe(Effect.result)).toMatchObject({
+      _tag: "Failure",
+      failure: { reason: "concurrency" },
+    });
+    yield* manager.reconcile;
+    yield* manager.provision(next);
+    expect(base.counters.created).toBe(2);
   }).pipe(Effect.scoped),
 );
 
@@ -1572,6 +1636,38 @@ it.effect.each(["found", "missing"] as const)(
     }).pipe(Effect.scoped),
 );
 
+it.effect("recovers allocation ownership for a legacy retry without replacing its VM", () =>
+  Effect.gen(function* () {
+    const f = fixture();
+    const manager = yield* f.manager;
+    const id = ManagedCloudSandboxResourceId.make("legacy-ownership");
+    const input = {
+      operationId: id,
+      profile: SandboxProfileId.make("fixture"),
+      sandbox: { name: "legacy", size: "small", autoStopMinutes: 15 },
+    };
+    yield* manager.provision(input);
+    const ownership = {
+      sourceThreadId: ThreadId.make("owner"),
+      retention: "delete-on-completion",
+    } as const;
+    yield* manager.provision({ ...input, ownership });
+    expect(f.connections()).toBe(1);
+    expect(yield* manager.get(id)).toMatchObject({
+      owner: { _tag: "thread", threadId: "owner" },
+      retention: "delete-on-completion",
+    });
+    expect(
+      (yield* manager
+        .provision({
+          ...input,
+          ownership: { ...ownership, sourceThreadId: ThreadId.make("foreign") },
+        })
+        .pipe(Effect.result))._tag,
+    ).toBe("Failure");
+  }).pipe(Effect.scoped),
+);
+
 it.effect("binds a provisioned resource to a follower owner and refuses hostile rebinding", () =>
   Effect.gen(function* () {
     const f = fixture();
@@ -1581,6 +1677,11 @@ it.effect("binds a provisioned resource to a follower owner and refuses hostile 
       operationId: id,
       profile: SandboxProfileId.make("fixture"),
       sandbox: { name: "follower", size: "small", autoStopMinutes: 15 },
+      ownership: { sourceThreadId: ThreadId.make("thread-1"), retention: "delete-on-completion" },
+    });
+    expect(yield* manager.get(id)).toMatchObject({
+      owner: { _tag: "thread", hostEnvironmentId: "controller", threadId: "thread-1" },
+      retention: "delete-on-completion",
     });
     const bound = yield* manager.bindOwner(id, {
       _tag: "task",
@@ -1638,8 +1739,13 @@ it.effect("binds a provisioned resource to a follower owner and refuses hostile 
       _tag: "fork",
       operationId: child,
       name: "nested",
+      ownership: { sourceThreadId: ThreadId.make("nested-thread"), retention: "stop-and-retain" },
     });
-    expect((yield* manager.get(child)).owner).toEqual({ _tag: "user" });
+    expect((yield* manager.get(child)).owner).toEqual({
+      _tag: "thread",
+      hostEnvironmentId: "child",
+      threadId: "nested-thread",
+    });
     yield* manager.executeSource(id, token, {
       _tag: "bindOwner",
       resourceId: child,

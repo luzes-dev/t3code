@@ -1,3 +1,4 @@
+import { ManagedCloudSandboxPreviewInput } from "@t3tools/contracts";
 import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
@@ -65,16 +66,7 @@ const preview = Effect.gen(function* () {
   yield* authenticate(AuthOrchestrationOperateScope);
   const request = yield* HttpServerRequest.HttpServerRequest;
   const input = yield* request.json.pipe(
-    Effect.flatMap(
-      Schema.decodeUnknownEffect(
-        Schema.Struct({
-          resourceId: ManagedCloudSandboxResourceId,
-          url: Schema.String,
-          access: Schema.optionalKey(Schema.Literals(["local", "protected"])),
-          close: Schema.optionalKey(Schema.Boolean),
-        }),
-      ),
-    ),
+    Effect.flatMap(Schema.decodeUnknownEffect(ManagedCloudSandboxPreviewInput)),
   );
   const service = yield* CloudSandboxPreview.CloudSandboxPreview;
   return yield* service

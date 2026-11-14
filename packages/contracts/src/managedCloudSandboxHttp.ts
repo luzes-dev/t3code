@@ -1,4 +1,5 @@
 import * as Schema from "effect/Schema";
+import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 import * as HttpApiEndpoint from "effect/http-api/HttpApiEndpoint";
 import * as HttpApiSchema from "effect/http-api/HttpApiSchema";
 import * as HttpApiGroup from "effect/http-api/HttpApiGroup";
@@ -51,19 +52,28 @@ export class CloudSandboxProfileError extends Schema.TaggedError<CloudSandboxPro
   }
 }
 
+export const ManagedCloudSandboxPreviewInput = Schema.Struct({
+  resourceId: ManagedCloudSandboxResourceId,
+  url: Schema.String,
+  access: Schema.optionalKey(Schema.Literals(["local", "protected"])),
+  close: Schema.optionalKey(Schema.Boolean),
+  leaseId: Schema.optionalKey(TrimmedNonEmptyString.check(Schema.isMaxLength(128))),
+});
+export type ManagedCloudSandboxPreviewInput = typeof ManagedCloudSandboxPreviewInput.Type;
+export const ManagedCloudSandboxPreviewResult = Schema.Struct({
+  url: Schema.String,
+  leaseId: Schema.optionalKey(Schema.String),
+});
+export type ManagedCloudSandboxPreviewResult = typeof ManagedCloudSandboxPreviewResult.Type;
+
 export class ManagedCloudSandboxHttpApi extends HttpApiGroup.make("managedCloudSandbox").add(
   HttpApiEndpoint.post("preview", `${MANAGED_CLOUD_SANDBOX_PATH}/preview`, {
     headers: Schema.Struct({
       authorization: Schema.optionalKey(Schema.String),
       dpop: Schema.optionalKey(Schema.String),
     }),
-    payload: Schema.Struct({
-      resourceId: ManagedCloudSandboxResourceId,
-      url: Schema.String,
-      access: Schema.optionalKey(Schema.Literals(["local", "protected"])),
-      close: Schema.optionalKey(Schema.Boolean),
-    }),
-    success: Schema.Struct({ url: Schema.String }),
+    payload: ManagedCloudSandboxPreviewInput,
+    success: ManagedCloudSandboxPreviewResult,
     error: EnvironmentHttpCommonError,
   }),
   HttpApiEndpoint.post("operate", MANAGED_CLOUD_SANDBOX_PATH, {

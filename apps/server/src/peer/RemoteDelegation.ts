@@ -8,8 +8,8 @@ import {
   type OrchestratorMcpDelegateTaskInput,
   type OrchestratorMcpTaskCancelResult,
   type OrchestratorMcpThreadRun,
-  type OrchestratorMcpThreadSendInput,
-  type OrchestratorMcpThreadSendResult,
+  OrchestratorMcpThreadSendInput,
+  OrchestratorMcpThreadSendResult,
   type OrchestratorMcpThreadTimelineItem,
   type OrchestrationV2RemoteTaskChild,
   type OrchestrationV2ThreadLaunchWorkspaceStrategy,
@@ -35,7 +35,6 @@ import { withExecutedModelNote } from "@t3tools/provider-core/server/subagentPro
 
 import type * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import { RunSandboxSetupTool } from "../workspace/CloudSandboxWorkspaceTools.ts";
-import { OrchestratorToolkit } from "../mcp/toolkits/orchestrator/tools.ts";
 import { ProjectToolkit } from "../mcp/toolkits/project/tools.ts";
 import {
   resolveInteractionMode,
@@ -82,6 +81,13 @@ type ThreadScope = McpInvocationContext.McpThreadInvocationScope;
 const RemoteCapabilitiesTool = Tool.make("orchestrator_capabilities", {
   parameters: OrchestratorMcpCapabilitiesInput,
   success: OrchestratorMcpCapabilitiesResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+});
+
+const RemoteThreadSendTool = Tool.make("t3_thread_send", {
+  parameters: OrchestratorMcpThreadSendInput,
+  success: OrchestratorMcpThreadSendResult,
   failure: OrchestratorMcpFailure,
   failureMode: "return",
 });
@@ -395,16 +401,11 @@ const make = Effect.gen(function* () {
           projectId,
           threadId: launched.threadId,
         });
-      const sent = yield* forwarding.call(
-        scope,
-        OrchestratorToolkit.tools.t3_thread_send,
-        target.environmentId,
-        {
-          threadId: launched.threadId,
-          message: task,
-          clientRequestId: `workspace-continuation:${scope.thread.threadId}:${key}`,
-        },
-      );
+      const sent = yield* forwarding.call(scope, RemoteThreadSendTool, target.environmentId, {
+        threadId: launched.threadId,
+        message: task,
+        clientRequestId: `workspace-continuation:${scope.thread.threadId}:${key}`,
+      });
       childRunId = sent.runId;
     }
     const link = yield* links.get(target.environmentId).pipe(

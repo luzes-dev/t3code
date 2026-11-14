@@ -171,6 +171,7 @@ it.effect.each([true, false])(
         readonly payload_json: string;
       }>`SELECT payload_json FROM cloud_sandbox_workspaces WHERE workspace_id='owned'`;
       expect(failed[0]?.payload_json).toContain('"phase":"deleting"');
+      expect(yield* workspaces.sweep).toBe(1);
       expect(yield* workspaces.remove(scope, "owned")).toEqual({
         workspaceId: "owned",
         deleted: true,
@@ -327,7 +328,13 @@ it.effect("checks the real source gate before allocation and propagates child co
     yield* settings.updateSettings({ linkedEnvironmentsEnabled: true });
     yield* workspace.handoff(scope, input).pipe(Effect.result);
     expect(requests).toEqual([
-      { _tag: "fork", operationId: "owned-child", name: "child", enableLinkedEnvironments: true },
+      {
+        _tag: "fork",
+        operationId: "owned-child",
+        name: "child",
+        enableLinkedEnvironments: true,
+        ownership: { sourceThreadId: "owner", retention: "stop-and-retain" },
+      },
     ]);
   }).pipe(
     Effect.provide(
@@ -1168,6 +1175,7 @@ const rootFleetWorkspaces = (
     readonly manager?: Partial<Manager.CloudSandboxManager["Service"]>;
     readonly threads?: Partial<Threads.ThreadManagementService["Service"]>;
     readonly delegated?: () => void;
+    readonly transfer?: ProjectTransfer.CloudSandboxProjectTransfer["Service"]["transfer"];
   } = {},
 ) => {
   const shell = liveThreadShell(scope.thread.threadId);
@@ -1293,7 +1301,9 @@ const rootFleetWorkspaces = (
       ...overrides.manager,
     }),
     Layer.succeed(ProjectTransfer.CloudSandboxProjectTransfer, {
-      transfer: () => Effect.succeed("/home/sandbox/.t3/cloud-workspaces/root-workspace/repo"),
+      transfer:
+        overrides.transfer ??
+        (() => Effect.succeed("/home/sandbox/.t3/cloud-workspaces/root-workspace/repo")),
     }),
   );
   return Layer.effect(Workspaces.CloudSandboxWorkspaces, Workspaces.make).pipe(
@@ -1302,6 +1312,41 @@ const rootFleetWorkspaces = (
     ),
   );
 };
+
+it.effect("retries delegation after restart without overwriting the prepared checkout", () => {
+  const counts = { provisions: 0, releases: 0, interrupts: 0 };
+  let transfers = 0;
+  let attempts = 0;
+  const layer = rootFleetWorkspaces(counts, {
+    transfer: () =>
+      Effect.sync(() => {
+        transfers++;
+        return "/home/sandbox/.t3/cloud-workspaces/root-workspace/repo";
+      }),
+    delegated: () => {
+      attempts++;
+      if (attempts === 1) throw new Error("Child started but its response was lost.");
+    },
+  }).pipe(
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-checkout-recovery-" }).pipe(
+        Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+      ),
+    ),
+  );
+  return Effect.gen(function* () {
+    yield* writeControllerPort;
+    const workspaces = yield* Workspaces.CloudSandboxWorkspaces;
+    expect((yield* workspaces.delegateSandboxTask(scope, rootInput).pipe(Effect.exit))._tag).toBe(
+      "Failure",
+    );
+    const restarted = yield* Workspaces.make;
+    const result = yield* restarted.delegateSandboxTask(scope, rootInput);
+    expect(result.taskId).toBe("task");
+    expect(attempts).toBe(2);
+    expect(transfers).toBe(1);
+  }).pipe(Effect.provide(layer), Effect.scoped);
+});
 
 it.effect("remove still deletes a root sandbox whose child refuses the interrupt", () => {
   const counts = { provisions: 0, releases: 0, interrupts: 0 };

@@ -148,6 +148,24 @@ it.effect("rejects undiscovered ports and preserves protected preview paths and 
     );
     expect(new URL(concurrent[0].url).port).toBe(new URL(concurrent[1].url).port);
     expect(forwards).toBe(1);
+    for (const opened of concurrent)
+      yield* service.open({ resourceId, url: opened.url, close: true });
+    expect(forwards).toBe(0);
+    const leased = yield* service.open({
+      resourceId,
+      url: "http://localhost:5173/",
+      access: "local",
+      leaseId: "viewer-a",
+    });
+    yield* service.open({
+      resourceId,
+      url: "http://localhost:5173/",
+      access: "local",
+      leaseId: "viewer-b",
+    });
+    yield* service.open({ resourceId, url: leased.url, close: true, leaseId: "viewer-a" });
+    yield* service.open({ resourceId, url: leased.url, close: true, leaseId: "viewer-a" });
+    expect(forwards).toBe(1);
     yield* Scope.close(resourceScope, Exit.void);
     expect(forwards).toBe(0);
   }),

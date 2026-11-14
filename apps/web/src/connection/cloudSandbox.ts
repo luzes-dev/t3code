@@ -34,6 +34,7 @@ export const openSandboxPreview = createRuntimeCommand(connectionAtomRuntime, {
       url: string;
       local: boolean;
       close?: boolean | undefined;
+      leaseId?: string | undefined;
     },
     registry,
   ) {
@@ -71,6 +72,7 @@ export const openSandboxPreview = createRuntimeCommand(connectionAtomRuntime, {
       input.url,
       controllerLocal ? "local" : "protected",
       input.close === true,
+      input.leaseId,
     );
   }),
 });

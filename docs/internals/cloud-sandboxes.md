@@ -64,7 +64,7 @@ the durably stamped issue.
 | Environment picker, Settings scope, provider notices | Normal environment                   | Hidden; status/cost surface through the owning chat/task and the controller's managed-resource administration. A follower's degrade/issue state surfaces on its owning task card and as a collapsed banner in the controller's Settings; followers contribute no global provider warnings                                          |
 | Internal routing (proxy, SSH, `t3 serve`)            | Normal                               | Identical; `manager.resolve`/`CloudSandboxDirectory` still locate the environment by id                                                                                                                                                                                                                                            |
 | Creation                                             | User provisioning                    | `forkFromController`/`delegateSandboxTask`; bound to the owner after the delegated child exists                                                                                                                                                                                                                                    |
-| Owner binding                                        | `user` from creation                 | User-initiated forks inherit the source owner; child-initiated forks start unbound and bind once the task id exists                                                                                                                                                                                                                |
+| Owner binding                                        | `user` from creation                 | User-initiated forks inherit the source owner; delegated allocations belong to their source thread from creation and bind to its task once the task id exists                                                                                                                                                                      |
 | Release                                              | Manual delete from the UI            | Owner thread's journal (`remove`) or source child. Task followers bound to `delete-on-completion` (opt-in on `delegate_task`) also release when their delegated task settles (terminal `subagent.updated` status) and the VM has stopped; the orphan sweep reclaims the rest when the source thread is gone and the VM has stopped |
 | Persistence                                          | Survives restarts, always selectable | A stopped/recovered follower stays a follower; retention never promotes it                                                                                                                                                                                                                                                         |
 
@@ -77,11 +77,12 @@ payload. No new migration was required, and none should reuse `081`.
 - Old payloads without `owner`/`retention` decode as `user`/`manual`
   (`withDecodingDefault` in the contract), so upgraded records remain visible
   and selectable in Settings. Payloads without `issue` decode with no issue.
-- Delegated workspace journals persist the child result and ownership intent
-  before binding. A failed bind preserves the task and workspace, reports a
-  pending issue on the task, and retries on the same request and reconciliation
-  after restart. Clearing that issue is durable too, so a failed task update
-  does not lose recovery progress.
+- Delegated workspace journals persist setup and retention intent before allocation,
+  then checkpoint the prepared checkout before delegation. Retrying a launch must
+  reuse that checkout: copying again could overwrite work started before a lost
+  response. A failed bind preserves the task and workspace and retries after restart;
+  clearing its issue is durable too. Explicit deletion intent resumes in the sweep
+  even when the source thread or VM cannot be inspected.
 - Older completed journals without binding intent are repaired conservatively:
   bound retention remains authoritative; previously unbound resources use
   stop-and-retain because the original cleanup intent was never stored.
@@ -96,8 +97,9 @@ on rollback, never records.
 - `manager.bindOwner` derives the host id server-side: the controller's own
   environment id on the route path, the authenticating source record's
   environment id on the source path. Callers cannot assert host ids.
-- Rebinding to a _different_ owner is refused (`ownership` error); retrying
-  with the same owner is idempotent.
+- A source-thread owner may bind to a task hosted by that same environment and
+  source thread. Other ownership transfers are refused (`ownership` error);
+  retrying with the same owner is idempotent and preserves retention when omitted.
 - Cross-controller lookups fail structurally: records exist only on the
   controller that created them, and source-route children may act only on
   their own `parentResourceId` descendants.

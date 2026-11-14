@@ -27,6 +27,7 @@ import { makeConnections } from "./ManagerConnections.ts";
 import { makeControl } from "./ManagerControl.ts";
 import { makeManagerRuntime } from "./ManagerRuntime.ts";
 import { makeReconciler } from "./ManagerReconciler.ts";
+import { makeReservations } from "./ManagerReservations.ts";
 import { cloudSandboxDriverFactoryLayer } from "@t3tools/cloud-sandbox";
 
 export { CloudSandboxManagerError } from "./CloudSandboxStore.ts";
@@ -110,16 +111,17 @@ export const make = Effect.gen(function* () {
   const renewalsEnabled = yield* CloudSandboxRenewalsEnabled;
   const rt = yield* makeManagerRuntime(renewalsEnabled);
   const { locks, transport, store, scope, requireRecord, publicResource } = rt;
-  const connections = makeConnections(rt);
+  const reservations = makeReservations(rt);
+  const connections = makeConnections(rt, reservations);
   const { route, connect, disconnect, sourceContext } = connections;
-  const allocation = makeAllocation(rt, connections);
+  const allocation = makeAllocation(rt, connections, reservations);
   const { provision, fork, release } = allocation;
   // Optionally wired: only controllers provide the ledger layer; fixtures and
   // non-managed servers answer the source op with a typed ledger error.
   const followerHostSettings = Option.getOrUndefined(
     yield* Effect.serviceOption(FollowerHostSettings.FollowerHostSettingsLedger),
   );
-  const control = makeControl(rt, connections, allocation, followerHostSettings);
+  const control = makeControl(rt, connections, allocation, reservations, followerHostSettings);
   const { execute, artifact, executeSource, bindOwnerLocked } = control;
   const { reconcile } = makeReconciler(rt, connections, allocation);
   yield* reconcile.pipe(

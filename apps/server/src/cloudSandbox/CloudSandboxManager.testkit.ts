@@ -170,24 +170,34 @@ export const fixture = (
       Effect.andThen(
         request.url.includes("/activity") ? (activity.probe ?? Effect.void) : Effect.void,
       ),
-      Effect.as(
-        HttpClientResponse.fromWeb(
-          request,
-          responseFor(request.url, request.method) ??
-            Response.json(
-              request.url.includes("/activity")
-                ? { active: activity.active }
-                : {
-                    ok: true,
-                    sandbox: {
-                      id: "bx_23456789",
-                      name: "test",
-                      state: state === "stopped" ? "archived" : "ready",
-                      type: "small",
+      Effect.andThen(
+        Effect.sync(() => {
+          const response = responseFor(request.url, request.method);
+          if (response === undefined || response.ok) {
+            if (/\/sandboxes\/[^/]+\/stop$/u.test(request.url)) state = "stopped";
+            if (/\/sandboxes\/[^/]+\/resume$/u.test(request.url)) {
+              resumes++;
+              state = "ready";
+            }
+          }
+          return HttpClientResponse.fromWeb(
+            request,
+            response ??
+              Response.json(
+                request.url.includes("/activity")
+                  ? { active: activity.active }
+                  : {
+                      ok: true,
+                      sandbox: {
+                        id: "bx_23456789",
+                        name: "test",
+                        state: state === "stopped" ? "archived" : "ready",
+                        type: "small",
+                      },
                     },
-                  },
-            ),
-        ),
+              ),
+          );
+        }),
       ),
     );
   });

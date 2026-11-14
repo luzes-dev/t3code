@@ -13,6 +13,7 @@ import {
   type ModelSelection,
   type RuntimeMode,
   type ProviderInteractionMode,
+  type ManagedSandboxRetention,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Context from "effect/Context";
@@ -251,6 +252,10 @@ export const make = Effect.gen(function* () {
         readonly size?: string | undefined;
         readonly autoStopMinutes?: number | undefined;
         readonly profile?: SandboxProfileId | undefined;
+        readonly ownership: {
+          readonly sourceThreadId: ThreadId;
+          readonly retention: ManagedSandboxRetention;
+        };
       },
     ) {
       const decoded = yield* decodeResourceId(workspaceId).pipe(
@@ -281,6 +286,7 @@ export const make = Effect.gen(function* () {
           autoStopMinutes: input.autoStopMinutes ?? profile.value.autoStopMinutes,
         },
         enableLinkedEnvironments: true,
+        ownership: input.ownership,
       });
       const controllerPort = yield* lifecycle.localServerPort;
       if (controllerPort <= 0) return yield* failure("Unable to determine the local server port.");
@@ -320,12 +326,14 @@ export const make = Effect.gen(function* () {
     branch: string,
     size: string | undefined,
     autoStopMinutes: number | undefined,
+    ownership: { readonly sourceThreadId: ThreadId; readonly retention: ManagedSandboxRetention },
   ) {
     const fork = yield* controller.request({
       _tag: "fork",
       enableLinkedEnvironments: true,
       operationId: workspaceId,
       name: branch,
+      ownership,
       ...(size === undefined ? {} : { size }),
       ...(autoStopMinutes === undefined ? {} : { autoStopMinutes }),
     });
@@ -594,12 +602,15 @@ export const make = Effect.gen(function* () {
         workspaceId,
         requestJson,
         branch: input.branch,
+        retention: "stop-and-retain",
+        runSetupScript: input.runSetupScript !== false,
         note: "The continuation runs in a separate disk-forked environment. The source thread history stays here. Deleting this owned workspace deletes its sandbox; archiving the thread does not.",
         acquire: forkFromController(
           workspaceId,
           input.branch,
           isolation.size,
           isolation.autoStopMinutes,
+          { sourceThreadId: scope.thread.threadId, retention: "stop-and-retain" },
         ),
         prepare: (acquired) =>
           prepareWorkspace(workspaceScope(scope, workspaceId), input.branch, acquired),
@@ -628,14 +639,6 @@ export const make = Effect.gen(function* () {
                 ),
               ),
             ),
-        owner: (delegated, connection) => ({
-          owner: {
-            _tag: "task",
-            hostEnvironmentId: connection.controllerEnvironmentId,
-            sourceThreadId: scope.thread.threadId,
-            taskId: delegated.taskId,
-          },
-        }),
       });
     }),
     remove: lifecycle.remove,
@@ -659,7 +662,11 @@ export const make = Effect.gen(function* () {
         // provision from the profile the way a worktree is created.
         const inSandbox = yield* controller.available;
         const acquire = inSandbox
-          ? forkFromController(workspaceId, input.branch, input.size, input.autoStopMinutes)
+          ? forkFromController(workspaceId, input.branch, input.size, input.autoStopMinutes, {
+              sourceThreadId: scope.thread.threadId,
+              retention:
+                input.deleteOnCompletion === true ? "delete-on-completion" : "stop-and-retain",
+            })
           : Effect.gen(function* () {
               const parent = yield* threads
                 .getThreadRecords(scope.thread.threadId, [])
@@ -671,6 +678,11 @@ export const make = Effect.gen(function* () {
                 return yield* invalid("The source project no longer exists.");
               const allocated = yield* provisionWorkspace(workspaceId, {
                 name: input.branch,
+                ownership: {
+                  sourceThreadId: scope.thread.threadId,
+                  retention:
+                    input.deleteOnCompletion === true ? "delete-on-completion" : "stop-and-retain",
+                },
                 ...(input.size === undefined ? {} : { size: input.size }),
                 ...(input.autoStopMinutes === undefined
                   ? {}
@@ -703,6 +715,8 @@ export const make = Effect.gen(function* () {
           workspaceId,
           requestJson,
           branch: input.branch,
+          retention: input.deleteOnCompletion === true ? "delete-on-completion" : "stop-and-retain",
+          runSetupScript: input.runSetupScript,
           note: "The task runs in a disposable sandbox workspace. It is reclaimed automatically once its source thread is deleted and the sandbox has stopped; deleting it earlier removes the sandbox.",
           acquire,
           prepare: (acquired) =>
@@ -738,19 +752,6 @@ export const make = Effect.gen(function* () {
                   ),
                 ),
               ),
-          owner: (delegated, connection) => ({
-            owner: {
-              _tag: "task",
-              hostEnvironmentId: connection.controllerEnvironmentId,
-              sourceThreadId: scope.thread.threadId,
-              taskId: delegated.taskId,
-            },
-            // Opted-in disposability: the sweep deletes this stopped sandbox
-            // once the delegated task settles; the default retains it.
-            ...(input.deleteOnCompletion === true
-              ? { retention: "delete-on-completion" as const }
-              : {}),
-          }),
         });
       },
     ),

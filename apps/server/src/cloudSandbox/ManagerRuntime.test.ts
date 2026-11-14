@@ -10,6 +10,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as ManagerRuntime from "./ManagerRuntime.ts";
 import * as Store from "./CloudSandboxStore.ts";
+import { CloudSandboxError } from "@t3tools/cloud-sandbox";
 
 const baseRecord = (): Store.CloudSandboxRecord => ({
   resourceId: ManagedCloudSandboxResourceId.make("follower-1"),
@@ -96,7 +97,17 @@ it.effect("stampConnectIssue classifies the connect failure's cause", () =>
     yield* ManagerRuntime.stampConnectIssue(
       store,
       resourceId,
-      new Store.CloudSandboxManagerError({ reason: "provider" }),
+      ManagerRuntime.toError(
+        new CloudSandboxError({ reason: "unavailable", cause: new Error("outage") }),
+      ),
+    );
+    expect(records.get("follower-1")?.issue?.cause).toBe("allocation");
+    yield* ManagerRuntime.stampConnectIssue(
+      store,
+      resourceId,
+      ManagerRuntime.toError(
+        new CloudSandboxError({ reason: "authentication", cause: new Error("rejected") }),
+      ),
     );
     expect(records.get("follower-1")?.issue?.cause).toBe("provider-auth");
     yield* ManagerRuntime.stampConnectIssue(
@@ -111,7 +122,7 @@ it.effect("stampConnectIssue classifies the connect failure's cause", () =>
       ManagedCloudSandboxResourceId.make("ghost"),
       new Store.CloudSandboxManagerError({ reason: "provider" }),
     );
-    expect(saveCount()).toBe(3);
+    expect(saveCount()).toBe(4);
   }),
 );
 

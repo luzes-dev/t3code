@@ -27,6 +27,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { EnvironmentHttpApi, type RepositoryIdentity } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cause from "effect/Cause";
+import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -875,12 +876,17 @@ const layerMakeRoutes = Layer.mergeAll(
       layerFollowerSettingsRuntime,
     ).pipe(Layer.provide(CloudSandboxController.layer)),
   ),
-  // provideRequest builds in a forked memo map that only reuses what the parent already holds,
-  // so the manager and profiles below must be provided after it to stay single instances.
   HttpRouter.provideRequest(
-    CloudSandboxPreview.layer.pipe(
-      Layer.provideMerge(CloudSandboxManager.layer),
-      Layer.provideMerge(CloudSandboxProfiles.layer),
+    Layer.effectContext(
+      Effect.gen(function* () {
+        const manager = yield* CloudSandboxManager.CloudSandboxManager;
+        const profiles = yield* CloudSandboxProfiles.CloudSandboxProfiles;
+        const preview = yield* Layer.build(CloudSandboxPreview.layer);
+        return Context.make(CloudSandboxManager.CloudSandboxManager, manager).pipe(
+          Context.add(CloudSandboxProfiles.CloudSandboxProfiles, profiles),
+          Context.merge(preview),
+        );
+      }),
     ),
   ),
   Layer.provide(CloudSandboxProfiles.layer),

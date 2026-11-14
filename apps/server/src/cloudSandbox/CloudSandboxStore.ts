@@ -16,6 +16,7 @@ export class CloudSandboxManagerError extends Schema.TaggedError<CloudSandboxMan
       "ownership",
       "transport",
       "provider",
+      "provider-auth",
       "rate-limited",
       "storage",
       "budget",
@@ -46,6 +47,8 @@ export class CloudSandboxManagerError extends Schema.TaggedError<CloudSandboxMan
         return "The managed cloud connection could not be established.";
       case "provider":
         return "The cloud provider could not complete this operation.";
+      case "provider-auth":
+        return "The cloud provider rejected this profile's credentials or permissions.";
       case "rate-limited":
         return "The cloud provider rate-limited this operation; retry shortly.";
       case "storage":
@@ -66,6 +69,8 @@ export const CloudSandboxRecord = Schema.Struct({
   power: Schema.Literals(["running", "stopped"]),
   intent: Schema.Literals(["connected", "disconnected"]),
   selection: ManagedCloudSandboxProvisionInput.fields.sandbox,
+  initialSelection: Schema.optionalKey(ManagedCloudSandboxProvisionInput.fields.sandbox),
+  allocationOwnership: ManagedCloudSandboxProvisionInput.fields.ownership,
   reservation: Schema.optionalKey(
     Schema.Struct({
       size: ManagedCloudSandboxProvisionInput.fields.sandbox.fields.size,

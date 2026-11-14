@@ -1,4 +1,9 @@
-import { MANAGED_CLOUD_SOURCE_PORT, type ManagedCloudSandboxResourceId } from "@t3tools/contracts";
+import {
+  MANAGED_CLOUD_SOURCE_PORT,
+  type ManagedCloudSandboxResourceId,
+  type ManagedCloudSandboxPreviewInput,
+  type ManagedCloudSandboxPreviewResult,
+} from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Effect from "effect/Effect";
@@ -22,12 +27,9 @@ import { CloudSandboxManagerError } from "./CloudSandboxStore.ts";
 export class CloudSandboxPreview extends Context.Service<
   CloudSandboxPreview,
   {
-    readonly open: (input: {
-      readonly resourceId: ManagedCloudSandboxResourceId;
-      readonly url: string;
-      readonly access?: "local" | "protected";
-      readonly close?: boolean;
-    }) => Effect.Effect<{ readonly url: string }, CloudSandboxManagerError>;
+    readonly open: (
+      input: ManagedCloudSandboxPreviewInput,
+    ) => Effect.Effect<ManagedCloudSandboxPreviewResult, CloudSandboxManagerError>;
   }
 >()("t3/cloudSandbox/CloudSandboxPreview") {}
 
@@ -36,7 +38,10 @@ export const make = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const net = yield* Net.NetService;
   const sshCommand = yield* resolveSshCommand;
-  const forwards = new Map<string, { port: number; scope: Scope.Closeable; users: number }>();
+  const forwards = new Map<
+    string,
+    { port: number; scope: Scope.Closeable; legacyUsers: number; leases: Set<string> }
+  >();
   const locks = yield* KeyedLock.make<ManagedCloudSandboxResourceId>();
   const client = yield* HttpClient.HttpClient;
   return CloudSandboxPreview.of({
@@ -53,8 +58,11 @@ export const make = Effect.gen(function* () {
               url.hostname === "127.0.0.1" &&
               Number(url.port) === forward.port
             ) {
-              if (forward.users > 1) forward.users--;
-              else yield* Scope.close(forward.scope, Exit.void);
+              if (input.leaseId === undefined)
+                forward.legacyUsers = Math.max(0, forward.legacyUsers - 1);
+              else forward.leases.delete(input.leaseId);
+              if (forward.legacyUsers === 0 && forward.leases.size === 0)
+                yield* Scope.close(forward.scope, Exit.void);
               return { url: input.url };
             }
           }
@@ -91,10 +99,14 @@ export const make = Effect.gen(function* () {
           const key = `${input.resourceId}:${url.protocol}:${port}`;
           const existing = forwards.get(key);
           if (existing !== undefined) {
-            existing.users++;
+            if (input.leaseId === undefined) existing.legacyUsers++;
+            else existing.leases.add(input.leaseId);
             url.hostname = "127.0.0.1";
             url.port = String(existing.port);
-            return { url: url.toString() };
+            return {
+              url: url.toString(),
+              ...(input.leaseId === undefined ? {} : { leaseId: input.leaseId }),
+            };
           }
           const localPort = yield* manager
             .withConnection(input.resourceId, (target) =>
@@ -128,7 +140,12 @@ export const make = Effect.gen(function* () {
                     Exit.isFailure(exit) ? Scope.close(scope, Exit.void) : Effect.void,
                   ),
                 );
-                forwards.set(key, { port: reserved, scope, users: 1 });
+                forwards.set(key, {
+                  port: reserved,
+                  scope,
+                  legacyUsers: input.leaseId === undefined ? 1 : 0,
+                  leases: new Set(input.leaseId === undefined ? [] : [input.leaseId]),
+                });
                 yield* Effect.addFinalizer(() =>
                   Effect.sync(() => {
                     forwards.delete(key);
@@ -140,7 +157,10 @@ export const make = Effect.gen(function* () {
             .pipe(Effect.mapError(() => new CloudSandboxManagerError({ reason: "transport" })));
           url.hostname = "127.0.0.1";
           url.port = String(localPort);
-          return { url: url.toString() };
+          return {
+            url: url.toString(),
+            ...(input.leaseId === undefined ? {} : { leaseId: input.leaseId }),
+          };
         }
         const hosted = yield* manager.execute(input.resourceId, {
           _tag: "host",

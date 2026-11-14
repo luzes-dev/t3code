@@ -45,8 +45,11 @@ export interface MaintainActiveSandboxOptions {
   readonly autoStopMinutes?: number | undefined;
 }
 
-export const maintainActiveSandbox = Effect.fn("CloudSandbox.maintainActiveSandbox")(function* <E>(
-  keepalive: import("./driver.ts").KeepaliveSandbox,
+export const maintainActiveSandbox = Effect.fn("CloudSandbox.maintainActiveSandbox")(function* <
+  E,
+  ExtensionError,
+>(
+  keepalive: import("./driver.ts").KeepaliveSandbox<ExtensionError>,
   sandboxId: string,
   isActive: Effect.Effect<boolean, E>,
   options?: MaintainActiveSandboxOptions,

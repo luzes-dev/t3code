@@ -25,6 +25,7 @@ import {
 } from "./ManagerRuntime.ts";
 import type { ManagerAllocation } from "./ManagerAllocation.ts";
 import type { ManagerConnections } from "./ManagerConnections.ts";
+import type { ManagerReservations } from "./ManagerReservations.ts";
 
 const toManagerLedgerError = (cause: FollowerHostSettings.FollowerHostSettingsLedgerError) =>
   new Store.CloudSandboxManagerError({
@@ -36,10 +37,10 @@ export const makeControl = (
   rt: ManagerRuntime,
   connections: ManagerConnections,
   allocation: ManagerAllocation,
+  reservations: ManagerReservations,
   followerHostSettings: FollowerHostSettings.FollowerHostSettingsLedger["Service"] | undefined,
 ) => {
   const {
-    renewalsEnabled,
     store,
     locks,
     transport,
@@ -50,7 +51,8 @@ export const makeControl = (
     resolveProfile,
   } = rt;
   const { sourceContext, connectUnlocked, disconnectUnlocked } = connections;
-  const { fork, release, reserveResume, reserveAllocation } = allocation;
+  const { fork, release } = allocation;
+  const { reserveResume, reserveAllocation, extend } = reservations;
   const ownerEquivalence = Schema.toEquivalence(ManagedSandboxOwner);
   /** Stamps ownership onto an unbound or identically-owned record. The host id
    * is always derived by the controller; callers never assert it. */
@@ -76,12 +78,23 @@ export const makeControl = (
             };
       // Rebinding to a different owner is refused: one task cannot take over
       // another's sandbox, and a retry with the same owner stays idempotent.
-      if (record.owner._tag !== "user" && !ownerEquivalence(record.owner, canonical))
+      const assignsOwnedTask =
+        record.owner._tag === "thread" &&
+        canonical._tag === "task" &&
+        record.owner.hostEnvironmentId === canonical.hostEnvironmentId &&
+        record.owner.threadId === canonical.sourceThreadId;
+      if (
+        record.owner._tag !== "user" &&
+        !assignsOwnedTask &&
+        !ownerEquivalence(record.owner, canonical)
+      )
         return yield* new Store.CloudSandboxManagerError({ reason: "ownership" });
       const next: Store.CloudSandboxRecord = {
         ...record,
         owner: canonical,
-        retention: retention ?? retentionForOwner(canonical),
+        retention:
+          retention ??
+          (record.owner._tag === "user" ? retentionForOwner(canonical) : record.retention),
       };
       const bound = next.issue?.cause === "bind" ? withoutIssue(next) : next;
       yield* store.save(bound);
@@ -121,7 +134,11 @@ export const makeControl = (
               );
         yield* disconnectUnlocked(id);
         const sandbox = yield* driver.stop(sandboxId).pipe(Effect.mapError(toError));
-        yield* store.save({ ...record, intent: "disconnected", power: "stopped" });
+        yield* store.save({
+          ...record,
+          intent: "disconnected",
+          power: sandbox.state === "stopped" ? "stopped" : "running",
+        });
         return { _tag: "status", sandbox, capabilities: cloudSandboxCapabilities(driver) };
       }
       case "resume": {
@@ -150,33 +167,12 @@ export const makeControl = (
               : driver.streaming.getDesktopStreamSession(sandboxId)
           ).pipe(Effect.mapError(toError)),
         };
-      case "extend": {
-        if (!renewalsEnabled)
-          return yield* new Store.CloudSandboxManagerError({ reason: "ownership" });
-        if (!driver.keepalive) return yield* unsupported();
-        const { profile } = yield* resolveProfile(record.profileId);
-        const reserved = yield* reserveAllocation(
-          profile,
-          record.selection.size,
-          operation.hours * 60,
-          record,
-        );
-        const sandbox = yield* driver.keepalive
-          .extendAutoStop(sandboxId, operation.hours)
-          .pipe(Effect.mapError(toError));
-        yield* store.save({
-          ...reserved,
-          reservation: {
-            ...reserved.reservation,
-            autoStopMinutes: Math.ceil(operation.hours * 60),
-          },
-        });
+      case "extend":
         return {
           _tag: "status",
-          sandbox,
+          sandbox: yield* extend(id, operation.hours),
           capabilities: cloudSandboxCapabilities(driver),
         };
-      }
       case "host":
         if (
           !Number.isInteger(operation.port) ||
@@ -344,9 +340,12 @@ export const makeControl = (
           result: yield* execute(id, { _tag: "host", port: operation.port, isPublic: false }),
         };
       case "fork": {
+        const source = yield* requireRecord(id);
+        if (source.environmentId === null)
+          return yield* new Store.CloudSandboxManagerError({ reason: "ownership" });
         const created = yield* fork(
           { ...operation, sourceResourceId: id },
-          { inheritOwner: false },
+          { inheritOwner: false, hostEnvironmentId: source.environmentId },
         );
         return {
           _tag: "connection",

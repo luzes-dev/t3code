@@ -184,6 +184,37 @@ describe("browser target resolver", () => {
     expect(resolveServerOwnedUrl(sandboxEnvironment, forwarded)).toBe(forwarded);
   });
 
+  it("owns shared preview forwards by tab and releases each lease only once", async () => {
+    const environmentId = EnvironmentId.make("sandbox-leases");
+    readPreparedConnection.mockReturnValue({ target: { _tag: "CloudSandboxConnectionTarget" } });
+    openSandboxPreviewRun.mockImplementation((_registry, input) =>
+      Promise.resolve(
+        AsyncResult.success({ url: "http://127.0.0.1:47124/app", leaseId: input.leaseId }),
+      ),
+    );
+    const {
+      acquireExternalServerUrl,
+      retainExternalServerUrl,
+      releasePreviewExternalServerUrl,
+      resolveServerOwnedUrl,
+    } = await import("./browserTargetResolver");
+    const first = await acquireExternalServerUrl(environmentId, "http://localhost:3000/app");
+    const other = await acquireExternalServerUrl(environmentId, "http://localhost:3000/app");
+    await retainExternalServerUrl(environmentId, "tab-a", first);
+    await retainExternalServerUrl(environmentId, "tab-b", other);
+    const refreshed = await acquireExternalServerUrl(environmentId, first.url);
+    await retainExternalServerUrl(environmentId, "tab-a", refreshed);
+    await first.release();
+    expect(openSandboxPreviewRun.mock.calls.filter(([, input]) => input.close)).toHaveLength(1);
+    await releasePreviewExternalServerUrl(environmentId, "tab-a");
+    await releasePreviewExternalServerUrl(environmentId, "tab-a");
+    expect(openSandboxPreviewRun.mock.calls.filter(([, input]) => input.close)).toHaveLength(2);
+    expect(resolveServerOwnedUrl(environmentId, other.url)).toBe("http://localhost:3000/app");
+    await releasePreviewExternalServerUrl(environmentId, "tab-b");
+    expect(openSandboxPreviewRun.mock.calls.filter(([, input]) => input.close)).toHaveLength(3);
+    expect(resolveServerOwnedUrl(environmentId, other.url)).toBe(other.url);
+  });
+
   it("keeps localhost for servers on the desktop's own WSL or primary backend", async () => {
     // WSL NAT advertises a distro IP, but loopback-bound servers only answer on localhost.
     const { resolveDiscoveredServerUrl } = await import("./browserTargetResolver");

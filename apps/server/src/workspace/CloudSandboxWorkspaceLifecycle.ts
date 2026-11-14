@@ -53,6 +53,18 @@ const Record = Schema.Struct({
   childEnvironmentId: Schema.optionalKey(EnvironmentId),
   result: Schema.NullOr(SandboxWorktreeHandoffResult),
   binding: Schema.optionalKey(Binding),
+  intent: Schema.optionalKey(
+    Schema.Struct({
+      retention: ManagedSandboxRetention,
+      runSetupScript: Schema.Boolean,
+    }),
+  ),
+  prepared: Schema.optionalKey(
+    Schema.Struct({
+      childProjectId: ProjectId,
+      workspacePath: Schema.String,
+    }),
+  ),
 });
 const decode = Schema.decodeUnknownEffect(Schema.fromJsonString(Record));
 const encode = Schema.encodeEffect(Schema.fromJsonString(Record));
@@ -110,6 +122,31 @@ export const make = Effect.fn("CloudSandboxWorkspaceLifecycle.make")(function* (
       yield* manager
         .release(resourceId)
         .pipe(Effect.mapError(() => failure("Unable to delete the sandbox workspace.")));
+  });
+  const finishRemoval = Effect.fn("CloudSandboxWorkspaces.finishRemoval")(function* (
+    record: typeof Record.Type,
+    beforeRelease: Effect.Effect<void> = Effect.void,
+  ) {
+    if (record.phase !== "resource-deleted") {
+      yield* save({ ...record, phase: "deleting" });
+      yield* beforeRelease;
+      yield* releaseResource(record.workspaceId);
+      record = { ...record, phase: "resource-deleted" };
+      yield* save(record);
+    }
+    const childEnvironmentId = record.childEnvironmentId ?? record.result?.environmentId;
+    if (childEnvironmentId !== undefined)
+      yield* links
+        .unlink(childEnvironmentId)
+        .pipe(
+          Effect.mapError(() =>
+            failure(
+              "The sandbox was deleted, but its peer link could not be removed. Retry cleanup.",
+            ),
+          ),
+        );
+    yield* save({ ...record, phase: "deleted" });
+    return { workspaceId: record.workspaceId, deleted: true };
   });
   /** Records the owner of a delegated workspace's resource; the controller
    * derives the host id, so in-sandbox and root paths validate identically. */
@@ -209,7 +246,10 @@ export const make = Effect.fn("CloudSandboxWorkspaceLifecycle.make")(function* (
           taskId: record.result.taskId,
         },
         // Old journals never stored delete-on-completion intent; bound retention is authoritative.
-        retention: resource.owner._tag === "user" ? "stop-and-retain" : resource.retention,
+        retention:
+          resource.owner._tag === "user"
+            ? (record.intent?.retention ?? "stop-and-retain")
+            : resource.retention,
         issue: yield* pendingIssue(resource.driverKind, resource.profileId),
       };
       record = { ...record, binding };
@@ -411,12 +451,14 @@ export const make = Effect.fn("CloudSandboxWorkspaceLifecycle.make")(function* (
             const id = yield* decodeResourceId(row.workspace_id);
             const record = yield* load(id);
             if (Option.isNone(record) || record.value.phase === "deleted") return false;
+            if (record.value.phase === "deleting" || record.value.phase === "resource-deleted") {
+              yield* finishRemoval(record.value);
+              return true;
+            }
             const shell = yield* threads
               .getThreadShell(record.value.sourceThreadId)
               .pipe(Effect.mapError(() => failure("Unable to inspect the source thread.")));
             const orphaned = shell === null || shell.deletedAt !== null;
-            const childEnvironmentId =
-              record.value.childEnvironmentId ?? record.value.result?.environmentId ?? null;
             const resourceId = record.value.workspaceId;
             const resource = yield* inspectResource(resourceId).pipe(Effect.option);
             if (Option.isNone(resource)) return false;
@@ -438,12 +480,7 @@ export const make = Effect.fn("CloudSandboxWorkspaceLifecycle.make")(function* (
               const deleted = yield* releaseResource(resourceId).pipe(Effect.result);
               if (deleted._tag === "Failure") return false;
             }
-            if (childEnvironmentId !== null) {
-              yield* links
-                .unlink(childEnvironmentId)
-                .pipe(Effect.mapError(() => failure("Unable to unlink the deleted workspace.")));
-            }
-            yield* save({ ...record.value, phase: "deleted" });
+            yield* finishRemoval({ ...record.value, phase: "resource-deleted" });
             return true;
           }),
         )
@@ -511,6 +548,8 @@ export const make = Effect.fn("CloudSandboxWorkspaceLifecycle.make")(function* (
       readonly requestJson: string;
       readonly branch: string;
       readonly note: string;
+      readonly retention: ManagedSandboxRetention;
+      readonly runSetupScript: boolean;
       readonly acquire: Effect.Effect<AcquiredWorkspace, WorktreeMcpFailure>;
       readonly prepare: (
         acquired: AcquiredWorkspace,
@@ -525,18 +564,10 @@ export const make = Effect.fn("CloudSandboxWorkspaceLifecycle.make")(function* (
         Pick<SandboxWorktreeHandoffResult, "taskId" | "threadId" | "projectId">,
         WorktreeMcpFailure
       >;
-      /** Binds the resource to its owner once the delegated child task exists,
-       * with the retention the delegating flow asked for. */
-      readonly owner: (
-        delegated: { readonly taskId: string },
-        connection: ManagedCloudSandboxConnection,
-      ) => {
-        readonly owner: ManagedSandboxFollowerOwner;
-        readonly retention?: ManagedSandboxRetention | undefined;
-      };
     },
   ) {
     const { workspaceId, requestJson } = input;
+    const intent = { retention: input.retention, runSetupScript: input.runSetupScript };
     return yield* lock.withLock(
       workspaceId,
       Effect.gen(function* () {
@@ -548,7 +579,10 @@ export const make = Effect.fn("CloudSandboxWorkspaceLifecycle.make")(function* (
         if (Option.isSome(previous)) {
           if (
             previous.value.sourceThreadId !== scope.thread.threadId ||
-            previous.value.requestJson !== requestJson
+            previous.value.requestJson !== requestJson ||
+            (previous.value.intent !== undefined &&
+              (previous.value.intent.retention !== intent.retention ||
+                previous.value.intent.runSetupScript !== intent.runSetupScript))
           )
             return yield* invalid("This workspace id already belongs to another request.");
           if (
@@ -571,17 +605,24 @@ export const make = Effect.fn("CloudSandboxWorkspaceLifecycle.make")(function* (
           requestJson,
           phase: "creating",
           result: null,
+          intent,
         };
         yield* save(record);
         const acquired = yield* input.acquire;
+        if (
+          record.prepared !== undefined &&
+          record.childEnvironmentId !== acquired.connection.environmentId
+        )
+          return yield* failure("The prepared workspace belongs to another environment.");
         record = { ...record, childEnvironmentId: acquired.connection.environmentId };
         yield* save(record);
-        const attached = yield* input.prepare(acquired);
+        const attached = record.prepared ?? (yield* input.prepare(acquired));
+        record = { ...record, prepared: attached };
+        yield* save(record);
         const delegated = yield* input.delegate({
           connection: acquired.connection,
           childProjectId: attached.childProjectId,
         });
-        const bound = input.owner({ taskId: delegated.taskId }, acquired.connection);
         const result: SandboxWorktreeHandoffResult = {
           kind: "sandbox",
           workspaceId,
@@ -601,8 +642,13 @@ export const make = Effect.fn("CloudSandboxWorkspaceLifecycle.make")(function* (
           result,
           binding: {
             _tag: "pending",
-            owner: bound.owner,
-            retention: bound.retention ?? "stop-and-retain",
+            owner: {
+              _tag: "task",
+              hostEnvironmentId: scope.environmentId,
+              sourceThreadId: record.sourceThreadId,
+              taskId: delegated.taskId,
+            },
+            retention: intent.retention,
             issue: yield* pendingIssue(
               acquired.connection.driverKind,
               Option.isSome(resource) ? resource.value.profileId : "",
@@ -632,40 +678,24 @@ export const make = Effect.fn("CloudSandboxWorkspaceLifecycle.make")(function* (
           return yield* invalid("The calling thread does not own this cloud workspace.");
         const record = saved.value;
         if (record.phase === "deleted") return { workspaceId, deleted: true };
-        if (record.phase !== "resource-deleted") {
-          yield* save({ ...record, phase: "deleting" });
-          if (record.result) {
-            // Deleting the VM stops the child's work anyway, so an unreachable proxy must not block cleanup.
-            yield* forwarding
-              .interruptThread(scope, record.result.environmentId, {
-                threadId: record.result.threadId,
-              })
-              .pipe(
-                Effect.timeout("10 seconds"),
-                Effect.catch((cause) =>
-                  Effect.logWarning("Unable to stop active work in the child workspace.", {
-                    workspaceId,
-                    cause,
-                  }),
+        return yield* finishRemoval(
+          record,
+          record.result === null
+            ? Effect.void
+            : forwarding
+                .interruptThread(scope, record.result.environmentId, {
+                  threadId: record.result.threadId,
+                })
+                .pipe(
+                  Effect.timeout("10 seconds"),
+                  Effect.catch((cause) =>
+                    Effect.logWarning("Unable to stop active work in the child workspace.", {
+                      workspaceId,
+                      cause,
+                    }),
+                  ),
                 ),
-              );
-          }
-          yield* releaseResource(record.workspaceId);
-          yield* save({ ...record, phase: "resource-deleted" });
-        }
-        const childEnvironmentId = record.childEnvironmentId ?? record.result?.environmentId;
-        if (childEnvironmentId)
-          yield* links
-            .unlink(childEnvironmentId)
-            .pipe(
-              Effect.mapError(() =>
-                failure(
-                  "The sandbox was deleted, but its peer link could not be removed. Retry cleanup.",
-                ),
-              ),
-            );
-        yield* save({ ...record, phase: "deleted" });
-        return { workspaceId, deleted: true };
+        );
       }),
     );
   });

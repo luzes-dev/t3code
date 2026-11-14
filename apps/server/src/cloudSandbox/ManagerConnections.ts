@@ -16,6 +16,7 @@ import {
 } from "@t3tools/contracts";
 import * as Store from "./CloudSandboxStore.ts";
 import type { ManagedCloudSandboxRoute } from "./CloudSandboxManager.ts";
+import type { ManagerReservations } from "./ManagerReservations.ts";
 import {
   isDeletedOrDeleting,
   stampConnectIssue,
@@ -26,7 +27,7 @@ import {
 } from "./ManagerRuntime.ts";
 
 const decodeActivity = Schema.decodeUnknownEffect(CloudSandboxActivity);
-export const makeConnections = (rt: ManagerRuntime) => {
+export const makeConnections = (rt: ManagerRuntime, reservations: ManagerReservations) => {
   const {
     renewalsEnabled,
     store,
@@ -259,9 +260,17 @@ export const makeConnections = (rt: ManagerRuntime) => {
           Effect.flatMap(decodeActivity),
           Effect.map((activity) => activity.active),
         );
-      const worker = yield* maintainActiveSandbox(driver.keepalive, sandboxId, active, {
-        autoStopMinutes: record.selection.autoStopMinutes,
-      }).pipe(
+      const worker = yield* maintainActiveSandbox(
+        {
+          extendAutoStop: (_sandboxId, hours) =>
+            locks.withLock(record.resourceId, reservations.extend(record.resourceId, hours)),
+        },
+        sandboxId,
+        active,
+        {
+          autoStopMinutes: record.selection.autoStopMinutes,
+        },
+      ).pipe(
         Effect.catchCause(() => Effect.logWarning("Managed cloud keepalive stopped.")),
         Effect.forkIn(scope),
       );

@@ -44,6 +44,11 @@ export type ManagedSandboxRetention = typeof ManagedSandboxRetention.Type;
 export const legacyOwner = (): ManagedSandboxOwner => ({ _tag: "user" });
 export const legacyRetention = (): ManagedSandboxRetention => "manual";
 
+const AllocationOwnership = Schema.Struct({
+  sourceThreadId: ThreadId,
+  retention: ManagedSandboxRetention,
+});
+
 /**
  * Why a managed sandbox is degraded, as its owner-facing and admin surfaces render
  * it. Emitters overwrite on retry and clear on recovery: presence is state, not
@@ -111,6 +116,7 @@ export const ManagedCloudSandboxProvisionInput = Schema.Struct({
   ...CloudSandboxPrepareInput.fields,
   operationId: ManagedCloudSandboxResourceId,
   enableLinkedEnvironments: Schema.optionalKey(Schema.Boolean),
+  ownership: Schema.optionalKey(AllocationOwnership),
 });
 export type ManagedCloudSandboxProvisionInput = typeof ManagedCloudSandboxProvisionInput.Type;
 export const ManagedCloudSandboxForkInput = Schema.Struct({
@@ -122,6 +128,7 @@ export const ManagedCloudSandboxForkInput = Schema.Struct({
     Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 43200 })),
   ),
   enableLinkedEnvironments: Schema.optionalKey(Schema.Boolean),
+  ownership: Schema.optionalKey(AllocationOwnership),
 });
 export type ManagedCloudSandboxForkInput = typeof ManagedCloudSandboxForkInput.Type;
 /** Valid lifecycle/owner/retention combinations for a bound resource. */
@@ -216,6 +223,7 @@ export const ManagedCloudSandboxSourceOperation = Schema.Union([
     size: ManagedCloudSandboxForkInput.fields.size,
     autoStopMinutes: ManagedCloudSandboxForkInput.fields.autoStopMinutes,
     enableLinkedEnvironments: ManagedCloudSandboxForkInput.fields.enableLinkedEnvironments,
+    ownership: ManagedCloudSandboxForkInput.fields.ownership,
   }),
   Schema.TaggedStruct("connect", { resourceId: ManagedCloudSandboxResourceId }),
   Schema.TaggedStruct("delete", { resourceId: ManagedCloudSandboxResourceId }),

@@ -18,6 +18,7 @@ import { isElectron } from "~/env";
 import { readPreparedConnection } from "~/state/session";
 import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
+import { randomUUID } from "~/lib/utils";
 
 export { normalizeHostname, isLocalLoopbackHost } from "@t3tools/shared/hostClassification";
 
@@ -107,7 +108,7 @@ interface SandboxedPreviewBase {
   /** The sandbox loopback origin, e.g. `http://localhost:3000`. */
   readonly sandboxOrigin: string;
   readonly providerParams: ReadonlyArray<readonly [string, string]>;
-  readonly users: number;
+  readonly leases: Map<string, ExternalServerUrlLease>;
 }
 
 const previewOrigins = new Map<string, Map<string, SandboxedPreviewBase>>();
@@ -137,13 +138,15 @@ const rememberAliasBase = (environmentId: EnvironmentId, sandboxUrl: URL, aliasU
   const bases = sandboxAliasBases(environmentId);
   const key = JSON.stringify([origin, pathPrefix, providerParams]);
   const previous = bases.get(key);
-  bases.set(key, {
+  const base = previous ?? {
     origin,
     pathPrefix,
     sandboxOrigin: `${sandboxUrl.protocol}//${sandboxUrl.host}`,
     providerParams,
-    users: (previous?.users ?? 0) + 1,
-  });
+    leases: new Map<string, ExternalServerUrlLease>(),
+  };
+  bases.set(key, base);
+  return { base, key };
 };
 
 const aliasToServerOwnedUrl = (environmentId: EnvironmentId, aliasUrl: string): string | null => {
@@ -191,57 +194,111 @@ export function resolveServerOwnedUrl(environmentId: EnvironmentId, rawUrl: stri
  * re-minted on every resolve so hosted previews reconnect instead of failing
  * after their session expires; non-loopback addresses load directly.
  */
-export async function resolveExternalServerUrl(
+export async function acquireExternalServerUrl(
   environmentId: EnvironmentId,
   rawUrl: string,
-): Promise<string> {
+): Promise<ExternalServerUrlLease> {
   if (!isSandboxEnvironment(environmentId))
-    return resolveDiscoveredServerUrl(environmentId, normalizePreviewUrl(rawUrl));
+    return {
+      url: resolveDiscoveredServerUrl(environmentId, normalizePreviewUrl(rawUrl)),
+      release: async () => {},
+    };
   const serverOwned = aliasToServerOwnedUrl(environmentId, rawUrl) ?? rawUrl;
   const parsed = new URL(serverOwned);
-  if (!isLoopbackHost(parsed.hostname)) return serverOwned;
+  if (!isLoopbackHost(parsed.hostname)) return { url: serverOwned, release: async () => {} };
+  const leaseId = randomUUID();
   const result = await openSandboxPreview.run(appAtomRegistry, {
+    leaseId,
     environmentId,
     url: serverOwned,
     local: isElectron && appAtomRegistry.get(primaryEnvironmentIdAtom) !== null,
   });
   if (result._tag === "Failure") {
-    if (isAtomCommandInterrupted(result)) return serverOwned;
+    if (isAtomCommandInterrupted(result)) return { url: serverOwned, release: async () => {} };
     const failure = squashAtomCommandFailure(result);
     throw new Error(
       failure instanceof Error ? failure.message : "This sandbox preview could not be hosted.",
     );
   }
-  rememberAliasBase(environmentId, parsed, new URL(result.value.url));
-  return result.value.url;
+  const alias = rememberAliasBase(environmentId, parsed, new URL(result.value.url));
+  let released: Promise<void> | undefined;
+  const lease: ExternalServerUrlLease = {
+    url: result.value.url,
+    release: () => {
+      released ??= (async () => {
+        alias?.base.leases.delete(leaseId);
+        const bases = previewOrigins.get(environmentId);
+        if (alias?.base.leases.size === 0) bases?.delete(alias.key);
+        if (bases?.size === 0) previewOrigins.delete(environmentId);
+        await openSandboxPreview
+          .run(appAtomRegistry, {
+            environmentId,
+            url: result.value.url,
+            local: isElectron && appAtomRegistry.get(primaryEnvironmentIdAtom) !== null,
+            close: true,
+            ...(result.value.leaseId === undefined ? {} : { leaseId: result.value.leaseId }),
+          })
+          .catch(() => undefined);
+      })();
+      return released;
+    },
+  };
+  alias?.base.leases.set(leaseId, lease);
+  return lease;
+}
+
+export interface ExternalServerUrlLease {
+  readonly url: string;
+  readonly release: () => Promise<void>;
+}
+
+const previewLeases = new Map<string, ExternalServerUrlLease>();
+const previewLeaseKey = (environmentId: EnvironmentId, tabId: string) =>
+  JSON.stringify([environmentId, tabId]);
+
+export async function retainExternalServerUrl(
+  environmentId: EnvironmentId,
+  tabId: string,
+  lease: ExternalServerUrlLease | null,
+): Promise<void> {
+  const key = previewLeaseKey(environmentId, tabId);
+  const previous = previewLeases.get(key);
+  if (lease === null) previewLeases.delete(key);
+  else previewLeases.set(key, lease);
+  if (previous !== undefined && previous !== lease) await previous.release();
+}
+
+export async function releasePreviewExternalServerUrl(
+  environmentId: EnvironmentId,
+  tabId: string,
+): Promise<void> {
+  await retainExternalServerUrl(environmentId, tabId, null);
+}
+
+export async function resolveExternalServerUrl(
+  environmentId: EnvironmentId,
+  rawUrl: string,
+): Promise<string> {
+  return (await acquireExternalServerUrl(environmentId, rawUrl)).url;
 }
 
 export async function releaseExternalServerUrl(
   environmentId: EnvironmentId,
   url: string,
 ): Promise<void> {
-  if (!isSandboxEnvironment(environmentId)) return;
-  if (aliasToServerOwnedUrl(environmentId, url) === null) return;
-  // Local forwards close here; provider-issued links follow the provider's lifetime.
-  await openSandboxPreview
-    .run(appAtomRegistry, {
-      environmentId,
-      url,
-      local: isElectron && appAtomRegistry.get(primaryEnvironmentIdAtom) !== null,
-      close: true,
-    })
-    .catch(() => undefined);
-  const alias = new URL(url);
-  const bases = previewOrigins.get(environmentId);
-  for (const [key, base] of bases ?? [])
+  const parsed = new URL(url);
+  for (const base of previewOrigins.get(environmentId)?.values() ?? []) {
     if (
-      `${alias.protocol}//${alias.host}` === base.origin &&
-      alias.pathname.startsWith(base.pathPrefix) &&
-      base.providerParams.every(([key, value]) => alias.searchParams.getAll(key).includes(value))
-    ) {
-      if (base.users > 1) bases?.set(key, { ...base, users: base.users - 1 });
-      else bases?.delete(key);
-      break;
-    }
-  if (bases?.size === 0) previewOrigins.delete(environmentId);
+      `${parsed.protocol}//${parsed.host}` !== base.origin ||
+      !parsed.pathname.startsWith(base.pathPrefix)
+    )
+      continue;
+    if (
+      !base.providerParams.every(([key, value]) => parsed.searchParams.getAll(key).includes(value))
+    )
+      continue;
+    const lease = base.leases.values().next().value;
+    await lease?.release();
+    return;
+  }
 }
