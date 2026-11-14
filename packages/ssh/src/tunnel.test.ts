@@ -1144,7 +1144,7 @@ describe("ssh tunnel scripts", () => {
   );
   it.live("concurrent launches on one remote home record the server that owns it", () =>
     // The second row's server never publishes server-runtime.json.
-    Effect.forEach([1_500, null], (publishDelayMs) =>
+    Effect.forEach([1_500, null, "isolated-home"] as const, (scenario) =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
@@ -1163,14 +1163,31 @@ describe("ssh tunnel scripts", () => {
           ),
         );
         const serverScript = path.join(home, "fake-t3.cjs");
-        yield* fs.writeFileString(serverScript, fakeT3Serve(publishDelayMs));
+        yield* fs.writeFileString(
+          serverScript,
+          fakeT3Serve(scenario === "isolated-home" ? 0 : scenario),
+        );
+        const serverHomeKey =
+          scenario === "isolated-home" ? SshServerHomeKey.make("b".repeat(64)) : undefined;
+        const serverHome = serverHomeKey
+          ? path.join(home, ".t3", "environments", serverHomeKey)
+          : path.join(home, ".t3");
         // A launch that died holding the lock must not block or double-admit later ones.
-        const launchLock = path.join(home, ".t3", "ssh-launch", ".launch.lock");
-        yield* fs.makeDirectory(path.dirname(launchLock), { recursive: true });
-        yield* fs.writeFileString(launchLock, "999999999\n");
+        const launchLock = path.join(serverHome, "ssh-launch", ".launch.lock");
+        if (!serverHomeKey) {
+          yield* fs.makeDirectory(path.dirname(launchLock), { recursive: true });
+          yield* fs.writeFileString(launchLock, "999999999\n");
+        }
+        const isolatedHome = serverHomeKey ? { serverHomeKey } : {};
         const targets = [
-          { alias: "devbox", hostname: "devbox", username: null, port: null },
-          { alias: "devbox-tailnet", hostname: "devbox-tailnet", username: null, port: null },
+          { alias: "devbox", hostname: "devbox", username: null, port: null, ...isolatedHome },
+          {
+            alias: "devbox-tailnet",
+            hostname: "devbox-tailnet",
+            username: null,
+            port: null,
+            ...isolatedHome,
+          },
         ];
 
         const launches = yield* Effect.forEach(
@@ -1183,7 +1200,7 @@ describe("ssh tunnel scripts", () => {
         ).pipe(Effect.provide(localRemoteShellLayer(home)));
 
         const ownerPid = Number(
-          yield* fs.readFileString(path.join(home, ".t3", "userdata", "server.lock")),
+          yield* fs.readFileString(path.join(serverHome, "userdata", "server.lock")),
         );
         assert.sameMembers(
           launches.map((launch) => launch.remoteServerKind),

@@ -611,7 +611,7 @@ RUNNER_FILE="$STATE_DIR/run-t3.sh"
 RUNNER_NEXT="$STATE_DIR/run-t3.next.$$"
 LAUNCH_LOCK="$DEFAULT_SERVER_HOME/ssh-launch/.launch.lock"
 LAUNCH_BREAK_LOCK="$LAUNCH_LOCK.break"
-mkdir -p "$STATE_DIR"
+mkdir -p "$STATE_DIR" "$DEFAULT_SERVER_HOME/ssh-launch"
 cleanup_launch() {
   rm -f "$RUNNER_NEXT"
   for OWNED_LOCK in "$LAUNCH_LOCK" "$LAUNCH_BREAK_LOCK"; do
