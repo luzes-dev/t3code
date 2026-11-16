@@ -77,6 +77,9 @@ import {
   TurnItemId,
   TrimmedNonEmptyString,
   managedRuntimeModeCeilingMessage,
+  leavesSandboxBridge,
+  SANDBOX_BRIDGE_INSTANCE_ID,
+  SANDBOX_BRIDGE_SWITCH_REFUSAL,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
@@ -831,6 +834,12 @@ function legacyPullRequestLink(
 }
 
 const DELEGATED_RESULT_INLINE_BYTES = 16_000;
+// A sandbox chat's host thread can hold messages for days while its sandbox is away. Older than
+// this, they are not the user coming back; sending them would hand the sandbox's agent stale work.
+const SANDBOX_STALE_RUN_AGE_MS = 60 * 60 * 1000;
+const isStaleSandboxBridgeRun = (run: OrchestrationV2Run, now: DateTime.Utc) =>
+  run.providerInstanceId === SANDBOX_BRIDGE_INSTANCE_ID &&
+  DateTime.toEpochMillis(now) - DateTime.toEpochMillis(run.requestedAt) > SANDBOX_STALE_RUN_AGE_MS;
 
 function delegatedCompletionWakeDetail(
   taskIds: ReadonlyArray<string>,
@@ -2221,9 +2230,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : projection.runs.find(
               (run) => run.id === options.queuedRunId && run.status === "queued",
             );
+      const pickedAt = yield* DateTime.now;
       while (
         storedQueuedRun !== undefined &&
-        isStalePullRequestWatchWake(projection, storedQueuedRun)
+        (isStalePullRequestWatchWake(projection, storedQueuedRun) ||
+          (options?.userStarted !== true && isStaleSandboxBridgeRun(storedQueuedRun, pickedAt)))
       ) {
         yield* writeSystemEvents(
           queuedRunCancellationEvents(projection, storedQueuedRun, yield* DateTime.now),
@@ -3919,6 +3930,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         commandId: command.commandId,
         commandType: command.type,
         cause: `Thread ${command.threadId} is deleted.`,
+      });
+    }
+    if (
+      (command.type === "thread.model-selection.set" || command.type === "provider.switch") &&
+      leavesSandboxBridge(thread.modelSelection, command.modelSelection)
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: SANDBOX_BRIDGE_SWITCH_REFUSAL,
       });
     }
     if (
@@ -6274,6 +6295,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         payload: { ...currentAttempt, status: "superseded", completedAt: now },
       });
     }
+    yield* closePendingSecretRequests({
+      command: input.command,
+      events: input.events,
+      threadId: input.command.threadId,
+      nodeId: rootNodeId,
+      now,
+    });
     if (currentRootNode !== undefined) {
       yield* emitEvent({
         type: "node.updated",
@@ -7133,6 +7161,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         : [];
     const releasedAt = yield* DateTime.now;
     for (const held of heldRunsToRelease) {
+      if (isStaleSandboxBridgeRun(held, releasedAt)) {
+        yield* emitQueuedRunCancellation({
+          command,
+          events,
+          projection,
+          run: { ...held, queueHeld: false },
+          now: releasedAt,
+        });
+        continue;
+      }
       yield* emit(
         events,
         command,
@@ -10127,14 +10165,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ),
         );
       const run = projection.runs.find((candidate) => candidate.id === command.runId);
-      if (run === undefined || run.rootNodeId !== command.nodeId) {
+      const existing = projection.turnItems.find((item) => item.id === command.turnItemId);
+      // A card whose node a steer replaced can still be closed, never answered.
+      const closesExisting =
+        existing?.nodeId === command.nodeId &&
+        (command.secretStatus === "declined" || command.secretStatus === "cancelled");
+      if (run === undefined || (run.rootNodeId !== command.nodeId && !closesExisting)) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
           cause: `Node ${command.nodeId} is not the root of run ${command.runId}.`,
         });
       }
-      const existing = projection.turnItems.find((item) => item.id === command.turnItemId);
       if (existing !== undefined && existing.type !== "secret_request") {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
@@ -10413,6 +10455,53 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ...item,
             status: "cancelled",
             linkStatus: "cancelled",
+            completedAt: input.now,
+            updatedAt: input.now,
+          },
+        });
+      }
+    },
+  );
+
+  /**
+   * Closes the secret cards a stopped root node asked. Only the `request_secret`
+   * call in that node's provider turn could hand the agent the answer.
+   */
+  const closePendingSecretRequests = Effect.fn("orchestrationV2.closePendingSecretRequests")(
+    function* (input: {
+      readonly command: OrchestrationV2ServerCommand;
+      readonly events: Ref.Ref<Array<OrchestrationV2DomainEvent>>;
+      readonly threadId: ThreadId;
+      readonly nodeId: NodeId;
+      readonly now: DateTime.Utc;
+    }) {
+      const { turnItems } = yield* projectionStore
+        .getThreadRecords(input.threadId, ["turnItems"], {
+          turnItemTypes: ["secret_request"],
+          turnItemStatuses: ["waiting"],
+          messageRoles: [],
+        })
+        .pipe(mapDispatchError(input.command));
+      for (const item of turnItems) {
+        if (
+          item.type !== "secret_request" ||
+          item.secretStatus !== "pending" ||
+          item.nodeId !== input.nodeId
+        )
+          continue;
+        yield* emit(
+          input.events,
+          input.command,
+        )({
+          type: "turn-item.updated",
+          threadId: input.threadId,
+          ...(item.runId === null ? {} : { runId: item.runId }),
+          nodeId: item.nodeId,
+          occurredAt: input.now,
+          payload: {
+            ...item,
+            status: "cancelled",
+            secretStatus: "cancelled",
             completedAt: input.now,
             updatedAt: input.now,
           },
@@ -11689,7 +11778,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
     if (
       state === null ||
-      state.run.workspacePreparation === undefined ||
+      // A sandbox chat's first message waits on its sandbox's launch instead of a workspace; the
+      // host retries the launch and then this.
+      (state.run.workspacePreparation === undefined &&
+        state.run.providerInstanceId !== SANDBOX_BRIDGE_INSTANCE_ID) ||
       failureItem === undefined ||
       projection.thread.archivedAt !== null ||
       projection.thread.deletedAt !== null
@@ -14655,6 +14747,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           return yield* new OrchestratorSubagentThreadReadOnlyError({
             commandId: command.commandId,
             threadId: command.threadId,
+          });
+        }
+        if (leavesSandboxBridge(thread.modelSelection, command.modelSelection)) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: SANDBOX_BRIDGE_SWITCH_REFUSAL,
           });
         }
         const guestSend =

@@ -554,6 +554,8 @@ export interface ProviderAdapterV2InterruptInput {
   readonly providerThread: OrchestrationV2ProviderThread;
   readonly providerTurnId: ProviderTurnId;
   readonly requestRuntimeRestart?: boolean;
+  /** The run restarts with a new message (a steer); any other interrupt is a Stop. */
+  readonly steer?: boolean;
 }
 
 export interface ProviderAdapterV2RuntimeRequestResponseInput {

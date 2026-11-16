@@ -38,5 +38,18 @@ export const SANDBOX_BRIDGE_WAKE_METHOD = "_t3code/sandbox_wake";
  */
 export const SANDBOX_RESUME_WAIT_SECONDS = 600;
 
+/** Why a sandbox chat refuses another provider: it would run on this computer, with no sandbox. */
+export const SANDBOX_BRIDGE_SWITCH_REFUSAL =
+  "This chat runs on a sandbox, so it keeps the sandbox's agent. Pick a model from the sandbox's list, or start a new chat to work on this computer.";
+
+/** Whether a selection would move a thread that runs through the sandbox bridge off it. */
+export const leavesSandboxBridge = (
+  current: { readonly instanceId: string },
+  next: { readonly instanceId: string } | undefined,
+): boolean =>
+  current.instanceId === SANDBOX_BRIDGE_INSTANCE_ID &&
+  next !== undefined &&
+  next.instanceId !== SANDBOX_BRIDGE_INSTANCE_ID;
+
 /** The prompt a sandbox continuation sends when it resumes a run the sandbox interrupted. */
 export const CONTINUE_AFTER_INTERRUPTION_PROMPT = "Continue where you left off.";

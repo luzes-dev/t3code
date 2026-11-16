@@ -988,6 +988,9 @@ importers:
       '@t3tools/provider-testing':
         specifier: workspace:*
         version: link:../../packages/provider-testing
+      '@t3tools/sandbox-bridge':
+        specifier: workspace:*
+        version: link:../../packages/sandbox-bridge
       '@t3tools/secret-provider-core':
         specifier: workspace:*
         version: link:../../packages/secret-provider-core

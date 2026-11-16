@@ -1,4 +1,9 @@
-import { CommandId, MessageId, type OrchestrationV2Command } from "@t3tools/contracts";
+import {
+  CommandId,
+  CONTINUE_AFTER_INTERRUPTION_PROMPT,
+  MessageId,
+  type OrchestrationV2Command,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -70,7 +75,7 @@ export function limitRecoveryCommand(
     ...(recovery.requestId === undefined
       ? {}
       : { usageLimitRecoveryRequestId: recovery.requestId }),
-    text: "Continue where you left off.",
+    text: CONTINUE_AFTER_INTERRUPTION_PROMPT,
     attachments: [],
     dispatchMode: { type: "start_immediately" },
     createdBy: "agent",

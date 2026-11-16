@@ -86,6 +86,7 @@
     "@t3tools/cloud-sandbox": "workspace:*",
     "@t3tools/contracts": "workspace:*",
     "@t3tools/provider-testing": "workspace:*",
+    "@t3tools/sandbox-bridge": "workspace:*",
     "@t3tools/secret-provider-core": "workspace:*",
     "@t3tools/secret-provider-definitions": "workspace:*",
     "@t3tools/secret-provider-onepassword": "workspace:*",

@@ -17,8 +17,22 @@ import {
   isCopilotLostSessionError,
   makeCopilotSubagentRouting,
 } from "./copilotAcp.ts";
-import { defaultInstanceIdForDriver, ProviderDriverKind } from "@t3tools/contracts";
+import {
+  defaultInstanceIdForDriver,
+  ProviderDriverKind,
+  OrchestrationV2Notification,
+  OrchestrationV2PendingBackgroundTask,
+  SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD,
+  SANDBOX_BRIDGE_CANCEL_META,
+  SANDBOX_BRIDGE_DEFAULT_MODEL_META,
+  SANDBOX_BRIDGE_INSTANCE_ID,
+  SANDBOX_BRIDGE_MESSAGE_META,
+  SANDBOX_BRIDGE_STEER_CANCEL,
+  SANDBOX_BRIDGE_WAKE_METHOD,
+  SANDBOX_BRIDGE_WITHDRAW_METHOD,
+} from "@t3tools/contracts";
 import { readCustomModelEntries } from "@t3tools/shared/model";
+import { findModelConfigOption } from "@t3tools/provider-acp/server/runtimeModel";
 import { AcpRegistrySettings } from "../settings.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveSelfInvocation, type SelfInvocation } from "@t3tools/shared/nodeRuntime";
@@ -113,6 +127,46 @@ export function registerMistralVibeAcpExtensions(context: AcpAdapterV2ExtensionC
           retryable: true,
         }),
       }),
+  );
+}
+
+const SandboxRequestsWithdrawn = Schema.Struct({ sessionId: Schema.String });
+const SandboxBackgroundWork = Schema.Struct({
+  sessionId: Schema.String,
+  tasks: Schema.Array(OrchestrationV2PendingBackgroundTask),
+});
+const SandboxWake = Schema.Struct({
+  sessionId: Schema.String,
+  messageId: Schema.String,
+  text: Schema.String,
+  notification: Schema.optional(OrchestrationV2Notification),
+});
+
+/**
+ * The sandbox bridge withdraws a request once it is answered on the sandbox, so both sides close
+ * it, reports what the sandbox's thread still works on after a turn as the thread's roster, and
+ * asks for a run of the host thread's own when the sandbox's thread starts one by itself.
+ */
+function registerSandboxBridgeExtensions(context: AcpAdapterV2ExtensionContext) {
+  return Effect.all(
+    [
+      context.runtime.handleExtNotification(
+        SANDBOX_BRIDGE_WITHDRAW_METHOD,
+        SandboxRequestsWithdrawn,
+        (notice) => context.withdrawPendingRequests(notice.sessionId),
+      ),
+      context.runtime.handleExtNotification(
+        SANDBOX_BRIDGE_BACKGROUND_WORK_METHOD,
+        SandboxBackgroundWork,
+        context.reportBackgroundTasks,
+      ),
+      context.runtime.handleExtNotification(
+        SANDBOX_BRIDGE_WAKE_METHOD,
+        SandboxWake,
+        context.requestContinuation,
+      ),
+    ],
+    { discard: true },
   );
 }
 
@@ -229,7 +283,17 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
           ...AcpProviderCapabilitiesV2,
           turns: { ...AcpProviderCapabilitiesV2.turns, supportsSteeringByInterruptRestart: false },
         }
-      : AcpProviderCapabilitiesV2,
+      : options.instanceId === SANDBOX_BRIDGE_INSTANCE_ID
+        ? {
+            // The server pushes a mode change straight to the sandbox thread, so a running
+            // sandbox turn keeps going under the new mode instead of being cut off.
+            ...AcpProviderCapabilitiesV2,
+            sessions: {
+              ...AcpProviderCapabilitiesV2.sessions,
+              supportsRuntimeModeSwitchInSession: true,
+            },
+          }
+        : AcpProviderCapabilitiesV2,
     customModels: readCustomModelEntries(options.settings.customModels).map((entry) => entry.slug),
     compactViaAdvertisedCommand: true,
     promptFailure: (cause) => acpRegistryPromptFailure(registryAgentId, cause),
@@ -244,6 +308,24 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
     ...(registryAgentId === "glm-acp-agent" ? { reportsPerTurnPromptUsage: true } : {}),
     ...(registryAgentId === "mistral-vibe"
       ? { registerExtensions: registerMistralVibeAcpExtensions }
+      : {}),
+    ...(options.instanceId === SANDBOX_BRIDGE_INSTANCE_ID
+      ? {
+          registerExtensions: registerSandboxBridgeExtensions,
+          reportsBackgroundTasks: true,
+          promptMeta: (message) => ({ [SANDBOX_BRIDGE_MESSAGE_META]: { ...message } }),
+          // A steer restarts the host's turn; the sandbox's run, and its tasks, keep going.
+          steerCancelMeta: { [SANDBOX_BRIDGE_CANCEL_META]: SANDBOX_BRIDGE_STEER_CANCEL },
+          // The bridge lists the sandbox's models only while the sandbox answers, and reads the
+          // pick from the thread when it sends, so a model it does not list now is no failure,
+          // and a session opened before it answered still takes a model change.
+          modelOptionArrivesLate: true,
+          applyModelSelection: ({ runtime, modelSelection }) =>
+            runtime.setConfigOption("model", modelSelection.model).pipe(
+              Effect.as(modelSelection.model),
+              Effect.orElseSucceed(() => undefined),
+            ),
+        }
       : {}),
     ...(isClaude
       ? {
@@ -309,11 +391,23 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
                   ),
               }
             : {}),
-          onSessionConfigurationUpdate: (configOptions, modeState, modelState) =>
-            runtimeCoordinator.publishLiveConfiguration(
+          onSessionConfigurationUpdate: (configOptions, modeState, modelState) => {
+            const configuration = normalizeAcpRegistryLiveConfiguration(
+              configOptions,
+              modeState,
+              modelState,
+            );
+            const defaultModelId =
+              options.instanceId === SANDBOX_BRIDGE_INSTANCE_ID
+                ? findModelConfigOption(configOptions)?._meta?.[SANDBOX_BRIDGE_DEFAULT_MODEL_META]
+                : undefined;
+            return runtimeCoordinator.publishLiveConfiguration(
               options.instanceId,
-              normalizeAcpRegistryLiveConfiguration(configOptions, modeState, modelState),
-            ),
+              typeof defaultModelId === "string"
+                ? { ...configuration, defaultModelId }
+                : configuration,
+            );
+          },
           onUrlElicitation: ({ elicitationId, url, message }) => {
             const normalizedUrl = normalizeAcpRegistryWebUrl(url);
             if (normalizedUrl === undefined || elicitationId.trim().length === 0) {

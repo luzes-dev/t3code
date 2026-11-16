@@ -2,6 +2,7 @@ import {
   officialAcpRegistryIconUrlForAgentId,
   ProviderDriverKind,
   resolveOfficialAcpRegistryIconUrl,
+  SANDBOX_BRIDGE_INSTANCE_ID,
   TextGenerationError,
   type AcpRegistryOperationError,
   type ServerProvider,
@@ -60,6 +61,7 @@ import * as AcpRegistrySupport from "./AcpRegistrySupport.ts";
 import * as AcpRegistryRuntimeCoordinator from "./AcpRegistryRuntimeCoordinator.ts";
 import * as AcpRegistryAuth from "./auth.ts";
 import * as AcpRegistryAuthenticationState from "./authenticationState.ts";
+import { makeSandboxBridgeModels } from "./sandboxBridgeModels.ts";
 
 const DRIVER_KIND = ProviderDriverKind.make("acpRegistry");
 const decodeSettings = Schema.decodeSync(AcpRegistrySettings);
@@ -582,19 +584,39 @@ export const AcpRegistryDriver: ProviderDriver<AcpRegistrySettings, AcpRegistryD
     // Refreshes rebuild the snapshot from the probe, so per-model options
     // learned from earlier sessions are kept here.
     const learnedModels = yield* Ref.make<ReadonlyArray<ServerProviderModel>>([]);
+    const sandboxBridgeModels =
+      instanceId === SANDBOX_BRIDGE_INSTANCE_ID
+        ? yield* makeSandboxBridgeModels(host.paths.providerStatusCacheDir)
+        : undefined;
+    const withSandboxBridgeModels = (provider: ServerProvider) =>
+      sandboxBridgeModels?.publish(provider) ?? Effect.succeed(provider);
     const applyLiveConfiguration = (
       provider: ServerProvider,
       configuration: AcpRegistryLiveConfiguration,
     ) =>
-      Ref.modify(learnedModels, (learned) => {
-        const next = applyAcpRegistryLiveConfiguration(
-          provider,
-          configuration,
-          effectiveConfig.customModels,
-          learned.length > 0 ? learned : provider.models,
-        );
-        return [next, next.models === provider.models ? learned : next.models];
-      });
+      sandboxBridgeModels === undefined
+        ? Ref.modify(learnedModels, (learned) => {
+            const next = applyAcpRegistryLiveConfiguration(
+              provider,
+              configuration,
+              effectiveConfig.customModels,
+              learned.length > 0 ? learned : provider.models,
+            );
+            return [next, next.models === provider.models ? learned : next.models];
+          })
+        : sandboxBridgeModels.known.pipe(
+            Effect.flatMap((known) =>
+              sandboxBridgeModels.report(
+                applyAcpRegistryLiveConfiguration(
+                  provider,
+                  configuration,
+                  effectiveConfig.customModels,
+                  known.length > 0 ? known : provider.models,
+                ),
+                configuration,
+              ),
+            ),
+          );
     const clearLearnedModels = Ref.set(learnedModels, []);
     const withLiveRuntimeState = Effect.fn("AcpRegistryDriver.withLiveRuntimeState")(function* (
       input: ServerProvider,
@@ -608,7 +630,7 @@ export const AcpRegistryDriver: ProviderDriver<AcpRegistrySettings, AcpRegistryD
           ? { ...input, auth: { ...input.auth, status: "authenticated" as const } }
           : input;
       return yield* Option.isNone(runtimeCoordinator)
-        ? Effect.succeed(provider)
+        ? withSandboxBridgeModels(provider)
         : Effect.all({
             commands: runtimeCoordinator.value.getAvailableCommands(instanceId),
             configuration: runtimeCoordinator.value.getLiveConfiguration(instanceId),
@@ -617,7 +639,7 @@ export const AcpRegistryDriver: ProviderDriver<AcpRegistrySettings, AcpRegistryD
             Effect.flatMap(({ commands, configuration, authAction }) => {
               const withCommands = applyAcpRegistryAvailableCommands(provider, commands);
               return Option.match(configuration, {
-                onNone: () => Effect.succeed(withCommands),
+                onNone: () => withSandboxBridgeModels(withCommands),
                 onSome: (liveConfiguration) =>
                   applyLiveConfiguration(withCommands, liveConfiguration),
               }).pipe(

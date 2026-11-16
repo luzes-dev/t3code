@@ -169,6 +169,8 @@ export interface AcpRegistryLiveConfiguration {
   readonly currentModelId: string | null;
   readonly configOptions: AcpRegistryProbeResult["configOptions"];
   readonly modelOptionIds?: NonNullable<AcpRegistryProbeResult["modelOptionIds"]>;
+  /** The sandbox bridge's: the model a sandbox chat gets when none is picked. */
+  readonly defaultModelId?: string;
 }
 
 export function normalizeAcpRegistryLiveConfiguration(

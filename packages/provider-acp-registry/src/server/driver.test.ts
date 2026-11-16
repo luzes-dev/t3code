@@ -3,6 +3,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   AcpRegistryOperationError,
   ProviderInstanceId,
+  SANDBOX_BRIDGE_INSTANCE_ID,
+  SANDBOX_BRIDGE_MODEL,
   type ServerProvider,
 } from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -696,5 +698,122 @@ it.layer(driverLayer, { excludeTestServices: true })("AcpRegistryDriver", (it) =
         "model-a:effort,model-b:effort",
       );
     }),
+  );
+
+  it.effect(
+    "lists what every sandbox chat reported, without the placeholder, across a restart",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "acp-driver-" });
+        const agentPath = path.join(directory, "agent.mjs");
+        const modelsPath = path.join(directory, "models.json");
+        yield* fileSystem.writeFileString(agentPath, fakeAgentSource);
+        // As the bridge's probe session does: only its placeholder.
+        yield* fileSystem.writeFileString(modelsPath, JSON.stringify([SANDBOX_BRIDGE_MODEL]));
+        const coordinator = yield* AcpRegistryRuntimeCoordinator.AcpRegistryRuntimeCoordinator;
+        const start = (instanceId: ProviderInstanceId) =>
+          AcpRegistryDriver.create({
+            instanceId,
+            displayName: "Sandboxes",
+            enabled: true,
+            environment: [],
+            config: decodeSettings({ source: "local", commandPath: "agent" }),
+          }).pipe(
+            Effect.provideService(AcpRegistrySupport.AcpRegistryCatalog, {
+              ...catalogWithInspection({
+                status: "ready",
+                agentId: "agent",
+                version: null,
+                distribution: "local",
+              }),
+              resolve: () =>
+                Effect.succeed({
+                  distribution: "local" as const,
+                  spawn: { command: process.execPath, args: [agentPath, modelsPath] },
+                }),
+            }),
+          );
+        const report = (
+          models: ReadonlyArray<string>,
+          levels: ReadonlyArray<string> = [],
+          defaultModelId?: string,
+        ) => ({
+          ...normalizeAcpRegistryLiveConfiguration([
+            {
+              id: "model",
+              name: "Model",
+              category: "model",
+              type: "select",
+              currentValue: models[0] ?? SANDBOX_BRIDGE_MODEL,
+              options: models.map((model) => ({ value: model, name: model })),
+            },
+            ...levels.slice(0, 1).map((currentValue) => ({
+              id: "effort",
+              name: "Effort",
+              category: "thought_level" as const,
+              type: "select" as const,
+              currentValue,
+              options: levels.map((level) => ({ value: level, name: level })),
+            })),
+          ]),
+          ...(defaultModelId === undefined ? {} : { defaultModelId }),
+        });
+        const listing = (snapshot: ServerProvider) =>
+          snapshot.models
+            .map((model) => {
+              const effort = model.capabilities?.optionDescriptors?.find(
+                (descriptor) => descriptor.id === "effort",
+              );
+              const levels =
+                effort?.type === "select"
+                  ? `(${effort.options.map((choice) => choice.id).join("|")})`
+                  : "";
+              return `${model.slug}${model.isDefault ? "*" : ""}${levels}`;
+            })
+            .join();
+        const reportAndList = Effect.fn(function* (
+          instanceId: ProviderInstanceId,
+          instance: Effect.Success<ReturnType<typeof start>>,
+          configuration: ReturnType<typeof report>,
+        ) {
+          yield* coordinator.publishLiveConfiguration(instanceId, configuration);
+          yield* instance.snapshot.refresh;
+          return listing(yield* instance.snapshot.getSnapshot);
+        });
+        const first = report(["opus", "sonnet", SANDBOX_BRIDGE_MODEL], ["low", "high"], "sonnet");
+        const second = report(["opus", "haiku", SANDBOX_BRIDGE_MODEL], ["medium", "max"]);
+
+        const sandboxes = ProviderInstanceId.make(SANDBOX_BRIDGE_INSTANCE_ID);
+        const host = yield* start(sandboxes);
+        yield* host.snapshot.refresh;
+        expect(yield* reportAndList(sandboxes, host, first)).toBe("opus(low|high),sonnet*");
+        // A sandbox that did not answer, then a session that only has the placeholder.
+        expect(yield* reportAndList(sandboxes, host, report([]))).toBe("opus(low|high),sonnet*");
+        expect(yield* reportAndList(sandboxes, host, report([SANDBOX_BRIDGE_MODEL]))).toBe(
+          "opus(low|high),sonnet*",
+        );
+        // Another sandbox's chat adds its models and has the newest word on the ones they share.
+        expect(yield* reportAndList(sandboxes, host, second)).toBe(
+          "opus(medium|max),sonnet*,haiku",
+        );
+        yield* host.invalidateCaches ?? Effect.void;
+
+        const restarted = yield* start(sandboxes);
+        yield* restarted.snapshot.refresh;
+        expect(listing(yield* restarted.snapshot.getSnapshot)).toBe(
+          "opus(medium|max),sonnet*,haiku",
+        );
+
+        // Any other ACP agent lists what its newest session reported, as before.
+        const otherId = ProviderInstanceId.make("acpRegistry_other");
+        const other = yield* start(otherId);
+        yield* other.snapshot.refresh;
+        yield* reportAndList(otherId, other, first);
+        expect(yield* reportAndList(otherId, other, second)).toBe(
+          `opus*(medium|max),haiku,${SANDBOX_BRIDGE_MODEL}`,
+        );
+      }),
   );
 });
