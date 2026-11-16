@@ -46,8 +46,10 @@ import { FetchHttpClient } from "effect/http";
 import { persistChatAttachments } from "../assets/PersistChatAttachments.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
+import * as ThreadMessageIntake from "../orchestration-v2/ThreadMessageIntake.ts";
 import * as Threads from "../orchestration-v2/ThreadManagementService.ts";
 import * as Projects from "../project/ProjectService.ts";
+import * as DocumentText from "../provider/DocumentText.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectTransfer from "../workspace/CloudSandboxProjectTransfer.ts";
 import * as Manager from "./CloudSandboxManager.ts";
@@ -135,6 +137,15 @@ const make = Effect.gen(function* () {
   const attachmentServices = yield* Effect.context<
     FileSystem.FileSystem | Path.Path | ServerConfig.ServerConfig
   >();
+  const fileSystem = yield* FileSystem.FileSystem;
+  const documentText = yield* DocumentText.DocumentText;
+  // First sends go through the intake claim layer like the composer's other sends, so a web
+  // client's pending uploads are copied to their final ids before the provider reads them.
+  const intakeServices = Context.make(Threads.ThreadManagementService, threads).pipe(
+    Context.add(ServerConfig.ServerConfig, config),
+    Context.add(FileSystem.FileSystem, fileSystem),
+    Context.add(DocumentText.DocumentText, documentText),
+  );
 
   const hash = (value: string) =>
     digest
@@ -474,21 +485,22 @@ const make = Effect.gen(function* () {
         creationSource: "web",
       })
       .pipe(Effect.mapError(chatError("Could not create the chat.")));
-    yield* threads
-      .dispatch({
-        type: "message.dispatch",
-        commandId: CommandId.make(`cloud-sandbox-chat:message:${input.message.messageId}`),
-        threadId: input.threadId,
-        messageId: input.message.messageId,
-        text: input.message.text,
-        attachments: yield* storedAttachments(input),
-        titleSeed: input.message.title,
-        modelSelection: bridgeModelSelection,
-        dispatchMode: { type: "defer_start" },
-        createdBy: "user",
-        creationSource: "web",
-      })
-      .pipe(Effect.mapError(chatError("Could not send the first message.")));
+    yield* ThreadMessageIntake.dispatchCommand({
+      type: "message.dispatch",
+      commandId: CommandId.make(`cloud-sandbox-chat:message:${input.message.messageId}`),
+      threadId: input.threadId,
+      messageId: input.message.messageId,
+      text: input.message.text,
+      attachments: yield* storedAttachments(input),
+      titleSeed: input.message.title,
+      modelSelection: bridgeModelSelection,
+      dispatchMode: { type: "defer_start" },
+      createdBy: "user",
+      creationSource: "web",
+    }).pipe(
+      Effect.provide(intakeServices),
+      Effect.mapError(chatError("Could not send the first message.")),
+    );
     yield* launch(input.threadId).pipe(
       Effect.catchCause((cause) => Effect.logWarning("Sandbox chat launch failed", { cause })),
       Effect.forkDetach,

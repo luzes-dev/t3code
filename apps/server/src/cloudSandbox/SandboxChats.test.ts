@@ -1,5 +1,8 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
 import { expect, it } from "@effect/vitest";
 import {
   type CloudSandboxChatStartInput,
@@ -15,6 +18,7 @@ import {
   RunId,
   SandboxProfileId,
   ThreadId,
+  ChatAttachmentId,
 } from "@t3tools/contracts";
 import { bridgeLinkSecretName } from "@t3tools/sandbox-bridge/link";
 import * as Deferred from "effect/Deferred";
@@ -30,6 +34,7 @@ import * as ServerConfig from "../config.ts";
 import * as Threads from "../orchestration-v2/ThreadManagementService.ts";
 import * as Sqlite from "../persistence/Sqlite.ts";
 import * as Projects from "../project/ProjectService.ts";
+import * as DocumentText from "../provider/DocumentText.ts";
 import * as Settings from "../serverSettings.ts";
 import * as ProjectTransfer from "../workspace/CloudSandboxProjectTransfer.ts";
 import * as Manager from "./CloudSandboxManager.ts";
@@ -94,6 +99,9 @@ const harness = () => {
           updateSettings: () => Effect.succeed({} as never),
           updateProviderInstance: () => Effect.succeed({} as never),
         }),
+        Layer.mock(DocumentText.DocumentText)({
+          ensure: () => Effect.succeed<string | undefined>(undefined),
+        }),
         Layer.mock(Threads.ThreadManagementService)({
           streamDomainEvents: Stream.empty,
           dispatch: (command) =>
@@ -105,7 +113,20 @@ const harness = () => {
                 const done = launched.get(command.threadId);
                 if (done !== undefined) yield* Deferred.succeed(done, undefined);
               }
-              return {} as never;
+              // The consumed attachments ride back in the stored events, which keeps the
+              // intake's fresh claims instead of releasing them.
+              const storedEvents =
+                command.type === "message.dispatch"
+                  ? [
+                      {
+                        event: {
+                          type: "message.updated",
+                          payload: { attachments: command.attachments },
+                        },
+                      },
+                    ]
+                  : [];
+              return { storedEvents } as never;
             }),
           getThreadRecords: (threadId) =>
             Effect.succeed({
@@ -280,6 +301,33 @@ it.effect(
         interactionMode: "default",
       });
       expect(h.provisions).toHaveLength(1);
+    }).pipe(Effect.provide(h.layer), registrar, Effect.scoped);
+  },
+);
+
+it.effect(
+  "claims a web client's pending upload so the sandboxed turn reads the stored file",
+  () => {
+    const h = harness();
+    const threadId = ThreadId.make("thread-upload");
+    return Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const pendingId = ChatAttachmentId.make("pending-3f2504e0-4f89-11d3-9a0c-0305e82c3301");
+      NodeFS.mkdirSync(config.attachmentsDir, { recursive: true });
+      NodeFS.writeFileSync(NodePath.join(config.attachmentsDir, `${pendingId}.png`), "abc");
+      // A web composer still owns this pending upload and releases it shortly after sending;
+      // the claim must have copied the bytes to the thread-scoped id before that release.
+      yield* h.startChat(threadId, "new", [
+        { type: "image", id: pendingId, name: "screen.png", mimeType: "image/png", sizeBytes: 3 },
+      ]);
+      const message = h.commands.find((command) => command.type === "message.dispatch");
+      const [stored] = message?.type === "message.dispatch" ? message.attachments : [];
+      expect(stored?.id).not.toBe(pendingId);
+      expect(String(stored?.id)).toMatch(/^thread-upload-/);
+      expect(stored).toMatchObject({ type: "image", name: "screen.png", sizeBytes: 3 });
+      expect(NodeFS.existsSync(NodePath.join(config.attachmentsDir, `${stored?.id}.png`))).toBe(
+        true,
+      );
     }).pipe(Effect.provide(h.layer), registrar, Effect.scoped);
   },
 );
