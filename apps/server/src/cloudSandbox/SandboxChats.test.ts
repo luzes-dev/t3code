@@ -22,6 +22,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
@@ -212,6 +213,7 @@ const harness = () => {
 
   return {
     layer,
+    launched,
     startChat,
     provisions,
     resumes,
@@ -316,5 +318,34 @@ it.effect("deletes a settled chat's sandbox and its link when the user says dele
     // Answered: a later settle of the same pairing asks nothing and deletes nothing more.
     yield* chats.onSettled(threadId);
     expect(h.released).toHaveLength(1);
+  }).pipe(Effect.provide(h.layer), registrar, Effect.scoped);
+});
+
+it.effect("relaunches a chat whose launch a restart cut short, exactly once", () => {
+  const h = harness();
+  const threadId = ThreadId.make("thread-restart");
+  return Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    // The restarted server finds the chat recorded and its first message still held.
+    yield* sql`INSERT INTO cloud_sandbox_chats (thread_id, resource_id, target)
+      VALUES (${threadId}, ${"chat-restarted"}, ${"new"})`;
+    const done = yield* Deferred.make<void>();
+    h.launched.set(threadId, done);
+    const chats = yield* SandboxChats.SandboxChats;
+    yield* chats.start();
+    yield* Deferred.await(done);
+    expect(h.provisions.map((input) => input.operationId)).toEqual(["chat-restarted"]);
+    expect(h.provisions[0]?.ownership?.sourceThreadId).toBe(threadId);
+    expect(h.commands.filter((command) => command.type === "prepared-run.release")).toHaveLength(1);
+    expect(h.transfers).toEqual(["chat-restarted"]);
+
+    // Another restart finds the follower and its copied project: it reconnects, nothing more.
+    const again = yield* Deferred.make<void>();
+    h.launched.set(threadId, again);
+    yield* chats.start();
+    yield* Deferred.await(again);
+    expect(h.provisions).toHaveLength(1);
+    expect(h.transfers).toHaveLength(1);
+    expect(h.resumes).toEqual(["chat-restarted"]);
   }).pipe(Effect.provide(h.layer), registrar, Effect.scoped);
 });

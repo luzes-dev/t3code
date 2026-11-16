@@ -255,13 +255,26 @@ sandbox, uncommitted files included.
 If an agent's provider isn't available in a sandbox, use a template snapshot that has its CLI
 installed and signed in.
 
+To start a chat in a sandbox yourself, pick it where you choose **Current checkout** or **New
+worktree** in a new chat's composer (on mobile, tap that control until it shows the sandbox):
+
+- **New sandbox** gives the chat a sandbox of its own.
+- **Project's sandbox** uses one kept sandbox for the project, resuming it if it stopped.
+- **Current sandbox** appears when you have a sandbox open, and uses that one.
+
+The chat stays on this server, so any device connected here can follow it, answer its questions,
+and stop it. When a chat on its own sandbox settles, T3 Code stops the sandbox and asks once
+whether to keep it (sending another message resumes it) or delete it. Tick **Remember for this
+project** to answer that for later chats too.
+
 Once a profile exists, **Settings → Environments** has a **Cloud sandboxes** section. Use it to
 change the limits, remove the profile, and stop, resume, open, or delete sandboxes. Removing a
 profile requires deleting its sandboxes first. On mobile the same controls are on each
 environment's settings page.
 
 Sandboxes stop on their own after the auto-stop window, unless agent work is active. T3 Code
-never starts a stopped sandbox by itself: you or an agent resumes it. Disconnecting a sandbox
+never starts a stopped sandbox by itself: you resume it, by opening it, sending a message to
+its chat, or with an agent. Disconnecting a sandbox
 stops routing to it but does not stop its compute: it stays billed until the auto-stop window
 closes, and the sandboxes list says so. Stopping always stops the billable runtime.
 

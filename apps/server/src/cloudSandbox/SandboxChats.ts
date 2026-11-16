@@ -559,6 +559,23 @@ const make = Effect.gen(function* () {
     return yield* stateOf(Option.getOrElse(updated, () => row.value));
   });
 
+  // A restart drops the launch fiber; a chat whose first message is still held launches again.
+  // Provisioning is idempotent by resource id, and a recorded sandbox project skips the copy.
+  const recoverLaunches = Effect.gen(function* () {
+    const rows = yield* sql`SELECT thread_id, resource_id, target, sandbox_project_id, settle
+      FROM cloud_sandbox_chats WHERE settle = 'none'`.pipe(
+      Effect.flatMap((found) => Effect.forEach(found, (row) => decodeRow(row))),
+    );
+    yield* Effect.forEach(
+      rows,
+      (row) =>
+        preparingRuns(row.thread_id).pipe(
+          Effect.flatMap((runs) => (runs.length === 0 ? Effect.void : launch(row.thread_id))),
+        ),
+      { discard: true },
+    );
+  });
+
   // One resume per run: a run's later updates must not reconnect the follower again.
   const resumingRuns = new Set<string>();
   const followEvents = Stream.runForEach(threads.streamDomainEvents, (event) => {
@@ -601,6 +618,12 @@ const make = Effect.gen(function* () {
         Effect.catchCause((cause) =>
           Effect.logWarning("Could not seed the Sandboxes provider instance", { cause }),
         ),
+      );
+      yield* recoverLaunches.pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Could not recover sandbox chat launches", { cause }),
+        ),
+        Effect.forkScoped,
       );
       yield* followEvents.pipe(
         Effect.catchCause((cause) => Effect.logWarning("Sandbox chat follower stopped", { cause })),

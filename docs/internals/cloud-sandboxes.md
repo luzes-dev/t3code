@@ -57,13 +57,51 @@ exhaust the same way); past that its task completes failed here with the
 unreachable wording instead of following forever. Until then the card shows
 the durably stamped issue.
 
+## Chat sandboxes
+
+A chat started on a sandbox keeps its thread on the host, on the internal
+`sandboxes` provider instance. That instance runs this server's own binary as
+`t3 sandbox-bridge` (an ACP agent, adapted from pingdotgg/t3code#27949), which
+forwards each turn to the thread with the same id on the follower and streams its
+work, approvals, wakes, and background roster back. The host copy is therefore the
+chat every client drives, including phones that never pair with a follower. The
+bridge reads the follower's address and bearer from the host secret store
+(`sandbox-bridge-<hex thread id>`) before every turn; `SandboxChats` rewrites that
+link on every connect, so a resumed follower's new SSH forward is picked up.
+Bridge spans go to `logs/sandbox-bridge.trace.ndjson`.
+
+- **Ownership.** A chat-created follower is provisioned with
+  `ownership: {sourceThreadId: <chat thread>}`, so the record is owned from its
+  first write, exactly like delegated allocations; rebinding it to another thread
+  is an `ownership` error.
+- **Targets.** _New sandbox_ derives its resource id from the thread id and starts
+  with `delete-on-completion`. _Project's sandbox_ derives its id from project and
+  profile (a deleted one moves to the next generation), so a second chat finds the
+  same record and resumes it instead of provisioning; it is `stop-and-retain` and
+  owned by the chat that created it. _Current sandbox_ reuses an open user-owned
+  sandbox without changing its owner.
+- **Settle.** Only a _New sandbox_ chat is asked, once per thread-follower pairing
+  (`cloud_sandbox_chats.settle`, migration `089`). The project's remembered answer
+  (`cloud_sandbox_projects.on_settle`) applies at once; otherwise the follower
+  stops and the chat waits on the user. Keep re-binds the same owner with
+  `stop-and-retain`; delete releases. Thread-owned followers are not touched by the
+  task sweep, so `delete-on-completion` here never deletes without an answer.
+- **Restarts.** A chat whose first message is still held relaunches at startup;
+  provisioning is idempotent by resource id and a recorded sandbox project skips the
+  copy, so a retry never re-copies over work started on the follower.
+
+Followers stay running while any thread on them, archived threads included, holds
+a live or queued run, a pending request, an in-flight subagent, command, or tool
+item, a waiting link request, or provider background work. Items of a rolled-back
+run and pull request watches do not keep a VM billing.
+
 ## Behavior matrix
 
 | Behavior                                             | Persistent (`user`)                  | Follower (`thread`/`task`)                                                                                                                                                                                                                                                                                                         |
 | ---------------------------------------------------- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Environment picker, Settings scope, provider notices | Normal environment                   | Hidden; status/cost surface through the owning chat/task and the controller's managed-resource administration. A follower's degrade/issue state surfaces on its owning task card and as a collapsed banner in the controller's Settings; followers contribute no global provider warnings                                          |
 | Internal routing (proxy, SSH, `t3 serve`)            | Normal                               | Identical; `manager.resolve`/`CloudSandboxDirectory` still locate the environment by id                                                                                                                                                                                                                                            |
-| Creation                                             | User provisioning                    | `forkFromController`/`delegateSandboxTask`; bound to the owner after the delegated child exists                                                                                                                                                                                                                                    |
+| Creation                                             | User provisioning                    | `forkFromController`/`delegateSandboxTask`/`SandboxChats`; bound to the owner after the delegated child exists                                                                                                                                                                                                                     |
 | Owner binding                                        | `user` from creation                 | User-initiated forks inherit the source owner; delegated allocations belong to their source thread from creation and bind to its task once the task id exists                                                                                                                                                                      |
 | Release                                              | Manual delete from the UI            | Owner thread's journal (`remove`) or source child. Task followers bound to `delete-on-completion` (opt-in on `delegate_task`) also release when their delegated task settles (terminal `subagent.updated` status) and the VM has stopped; the orphan sweep reclaims the rest when the source thread is gone and the VM has stopped |
 | Persistence                                          | Survives restarts, always selectable | A stopped/recovered follower stays a follower; retention never promotes it                                                                                                                                                                                                                                                         |
