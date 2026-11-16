@@ -562,6 +562,12 @@ export interface ProjectionStoreV2Shape {
   >;
   /** Threads that are not deleted, archived ones included. */
   readonly countThreads: () => Effect.Effect<number, ProjectionStoreV2Error>;
+  /**
+   * Whether any thread, archived included, holds work that must keep a cloud sandbox running: a
+   * live or queued run (wakes and queued turns included), a pending request, an in-flight
+   * subagent, command, or tool item, a waiting link request, or pending provider background work.
+   */
+  readonly hasPendingWork: () => Effect.Effect<boolean, ProjectionStoreV2Error>;
   /** Every active thread, in shell order. */
   readonly listActiveShellIndex: () => Effect.Effect<
     ReadonlyArray<ActiveShellIndexEntry>,
@@ -8676,6 +8682,47 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       return rows[0]?.count ?? 0;
     }, Effect.mapError(shellSnapshotReadError));
 
+    const hasPendingWork = Effect.fn("ProjectionStore.hasPendingWork")(function* () {
+      const rows = yield* sql<{ readonly pending: number }>`
+        SELECT EXISTS (
+          SELECT 1 FROM orchestration_v2_projection_threads t
+          -- Archiving hides a thread; it does not stop work already running on this machine.
+          WHERE t.deleted_at IS NULL
+            AND (
+              EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_runs r
+                WHERE r.thread_id = t.thread_id
+                  AND r.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+              )
+              OR EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_runtime_requests request
+                WHERE request.thread_id = t.thread_id AND request.status = 'pending'
+              )
+              -- Items of a rolled-back run are abandoned; they must not bill forever.
+              OR EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_turn_items item
+                JOIN orchestration_v2_projection_runs owner ON owner.run_id = item.run_id
+                WHERE item.thread_id = t.thread_id
+                  AND item.type IN ('command_execution', 'dynamic_tool', 'subagent')
+                  AND item.status NOT IN ('completed', 'interrupted', 'failed', 'cancelled')
+                  AND owner.status <> 'rolled_back'
+              )
+              OR EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_turn_items link_request
+                WHERE link_request.thread_id = t.thread_id
+                  AND link_request.type = 'link_request' AND link_request.status = 'waiting'
+              )
+              OR EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_provider_threads provider_thread
+                WHERE provider_thread.thread_id = t.thread_id
+                  AND json_array_length(provider_thread.payload_json, '$.pendingBackgroundTasks') > 0
+              )
+            )
+        ) AS pending
+      `;
+      return rows[0]?.pending === 1;
+    }, Effect.mapError(shellSnapshotReadError));
+
     const listActiveShellIndex = Effect.fn("ProjectionStore.listActiveShellIndex")(function* () {
       const rows = yield* sql<{
         readonly thread_id: string;
@@ -8963,6 +9010,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       listActiveSubagentThreadIds: readOnReader(listActiveSubagentThreadIds),
       countThreads: readOnReader(countThreads),
       listActiveShellIndex: readOnReader(listActiveShellIndex),
+      hasPendingWork: readOnReader(hasPendingWork),
       readShellSnapshot: readOnReader(readShellSnapshot),
       listOlderSettledThreads: readOnReader(listOlderSettledThreads),
       getThreadShell: readOnReader(getThreadShell),

@@ -1640,6 +1640,86 @@ it.effect("SQL shells flag only an active turn blocked solely on T3 thread waits
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect(
+  "pending sandbox work counts in-flight tasks of archived threads, not abandoned items",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = yield* addRolledBackRecoveryCandidate("pending-work");
+      assert.isFalse(yield* store.hasPendingWork());
+
+      const initial = yield* store.getThreadProjection(threadId);
+      const at = initial.updatedAt;
+      const run = {
+        ...initial.runs[0]!,
+        id: RunId.make("run:pending-work:delegating"),
+        ordinal: 2,
+        rootNodeId: NodeId.make("node:pending-work:delegating"),
+        userMessageId: MessageId.make("message:pending-work:delegating"),
+        status: "completed" as const,
+        completedAt: at,
+      };
+      yield* store.apply({
+        id: EventId.make("event:pending-work:run"),
+        type: "run.created",
+        threadId,
+        runId: run.id,
+        nodeId: run.rootNodeId,
+        driver,
+        providerInstanceId,
+        occurredAt: at,
+        payload: run,
+      });
+      const task = {
+        ...initial.turnItems[0]!,
+        id: TurnItemId.make("item:pending-work:task"),
+        runId: run.id,
+        nodeId: run.rootNodeId,
+        ordinal: 1,
+        type: "subagent" as const,
+        status: "running" as const,
+        subagentId: NodeId.make("node:pending-work:task"),
+        origin: "app_owned" as const,
+        driver,
+        providerInstanceId,
+        childThreadId: null,
+        prompt: "Review",
+        result: null,
+      };
+      yield* store.apply({
+        id: EventId.make("event:pending-work:task"),
+        type: "turn-item.updated",
+        threadId,
+        occurredAt: at,
+        payload: task,
+      });
+      const shell = yield* store.getThreadShell(threadId);
+      assert.isTrue(shell !== null && isLiveSubagentShell(shell));
+      assert.isTrue(yield* store.hasPendingWork());
+
+      // Archiving hides the thread from the shell index, but its task still runs on this machine.
+      yield* store.apply({
+        id: EventId.make("event:pending-work:archived"),
+        type: "thread.archived",
+        threadId,
+        occurredAt: at,
+        payload: { ...initial.thread, archivedAt: at, updatedAt: at },
+      });
+      const index = yield* store.listActiveShellIndex();
+      assert.isFalse(index.some((entry) => entry.id === threadId));
+      assert.isTrue(yield* store.hasPendingWork());
+
+      yield* store.apply({
+        id: EventId.make("event:pending-work:task-done"),
+        type: "turn-item.updated",
+        threadId,
+        occurredAt: at,
+        payload: { ...task, status: "completed", completedAt: at },
+      });
+      assert.isFalse(yield* store.hasPendingWork());
+    }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("SQL shells use the latest subagent owner for duplicate provider-thread ids", () =>
   Effect.gen(function* () {
     const store = yield* ProjectionStore.ProjectionStoreV2;
