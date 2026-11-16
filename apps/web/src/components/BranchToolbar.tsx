@@ -31,6 +31,7 @@ import {
   resolvePreviousWorktreeLabel,
   resolvePreviousWorktreeSeed,
   shouldShowEnvironmentIndicator,
+  resolveSandboxPickerItems,
 } from "./BranchToolbar.logic";
 import {
   BranchToolbarBranchSelector,
@@ -68,6 +69,11 @@ import { ComposerSurface } from "./chat/ComposerSurface";
 import { useComposerMenuProps } from "./chat/composerEventScope";
 import { cn } from "~/lib/utils";
 import { observeResize } from "~/lib/observeResize";
+import { useAtom } from "@effect/atom-react";
+import { selectableManagedSandboxesAtom } from "~/connection/cloudSandbox";
+import { draftSandboxTargetAtom } from "~/state/cloudSandboxChats";
+import { sandboxProfilesList } from "~/state/cloudSandboxProfiles";
+import { useEnvironmentQuery } from "~/state/query";
 
 export interface BranchToolbarHandle {
   openBranchPicker: () => void;
@@ -670,6 +676,26 @@ export const BranchToolbar = memo(function BranchToolbar({
     ],
   );
 
+  // Sandbox run targets apply to a chat not yet started.
+  const offersSandbox = !isServerThread && draftId !== undefined && !forceNewWorktree;
+  const sandboxProfiles = useEnvironmentQuery(
+    offersSandbox ? sandboxProfilesList({ environmentId, input: {} }) : null,
+  );
+  const openSandboxes = useEnvironmentQuery(
+    offersSandbox ? selectableManagedSandboxesAtom(environmentId) : null,
+  );
+  const openSandbox = openSandboxes.data?.find((resource) => resource.phase === "connected");
+  const sandboxItems = offersSandbox
+    ? resolveSandboxPickerItems({
+        hasProfile: (sandboxProfiles.data?.profiles.length ?? 0) > 0,
+        current:
+          openSandbox === undefined
+            ? null
+            : { resourceId: openSandbox.resourceId, label: openSandbox.label },
+      })
+    : [];
+  const [sandboxTarget, setSandboxTarget] = useAtom(draftSandboxTargetAtom(draftId ?? ""));
+
   const addTargets = useAddProjectTargets(activeProject, availableEnvironments);
   const onAddToMachine = (targetEnvironmentId: EnvironmentId | null) =>
     openAddProjectToMachine({ projectRef: activeProjectRef, targetEnvironmentId });
@@ -804,6 +830,9 @@ export const BranchToolbar = memo(function BranchToolbar({
               previousWorktreeLabel={previousWorktreeLabel}
               previousWorktreeBranch={previousWorktreeSeed?.branch ?? null}
               onUsePreviousWorktree={onUsePreviousWorktree}
+              sandboxItems={sandboxItems}
+              sandboxTarget={sandboxTarget}
+              onSandboxTargetChange={setSandboxTarget}
             />
           ) : null}
         </div>

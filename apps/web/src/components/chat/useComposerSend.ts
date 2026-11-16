@@ -1,3 +1,4 @@
+import { useAtomValue } from "@effect/atom-react";
 import { isClearComposerCommand, parseSideChatCommand } from "@t3tools/shared/composerTrigger";
 import { armFreshSession, disarmFreshSession, readFreshSessionArm } from "./freshSessionArms";
 import {
@@ -119,6 +120,7 @@ import { fileAttachmentCapabilityBlockReason } from "./composerAttachmentFiles";
 import { useLinkedEnvironments } from "../../state/peerLinks";
 import { readEnvironmentScope } from "../../state/session";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
+import { draftSandboxTargetAtom, sandboxChatStart } from "../../state/cloudSandboxChats";
 import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
   threadContextsOutsideEnvironment,
@@ -346,6 +348,8 @@ export function useComposerSend(input: ComposerSendInput) {
   const startThreadTurn = useOrchestrationCommand(threadEnvironment.startTurn, {
     reportFailure: false,
   });
+  const startSandboxChat = useOrchestrationCommand(sandboxChatStart, { reportFailure: false });
+  const draftSandboxTarget = useAtomValue(draftSandboxTargetAtom(draftId ?? ""));
   const uploadThreadFeedback = useOrchestrationCommand(threadEnvironment.uploadFeedback, {
     reportFailure: false,
   });
@@ -1289,31 +1293,49 @@ export function useComposerSend(input: ComposerSendInput) {
           )
         : null;
       if (backgroundThreadRef) beginBackgroundDraftSubmissionByRef(backgroundThreadRef);
-      const startPromise = startThreadTurn({
-        environmentId,
-        input: {
-          threadId: threadIdForSend,
-          message: {
-            messageId: messageIdForSend,
-            role: "user",
-            attachments: turnAttachmentsResult.value,
-            ...withMessageContext({
-              text: outgoingMessageText,
-              context: buildOutgoingMessageContext(
-                boundAttachmentIds(turnAttachmentsResult.value, composerAttachmentsSnapshot),
-              ),
-            }),
-          },
-          modelSelection: ctxSelectedModelSelection,
-          titleSeed: title,
-          runtimeMode,
-          interactionMode: DEFAULT_INTERACTION_MODE,
-          dispatchMode: turnDispatchMode,
-          ...(freshArm === undefined ? {} : { freshContext: true }),
-          ...(bootstrap ? { bootstrap } : {}),
-          createdAt: messageCreatedAt,
-        },
-      });
+      const sandboxTarget = isLocalDraftThread ? draftSandboxTarget : null;
+      const startPromise =
+        sandboxTarget !== null && outgoingMessageText.trim().length > 0
+          ? startSandboxChat({
+              environmentId,
+              input: {
+                threadId: threadIdForSend,
+                projectId: activeProject.id,
+                target: sandboxTarget,
+                message: {
+                  messageId: messageIdForSend,
+                  text: outgoingMessageText,
+                  title,
+                },
+                runtimeMode,
+                interactionMode: DEFAULT_INTERACTION_MODE,
+              },
+            })
+          : startThreadTurn({
+              environmentId,
+              input: {
+                threadId: threadIdForSend,
+                message: {
+                  messageId: messageIdForSend,
+                  role: "user",
+                  attachments: turnAttachmentsResult.value,
+                  ...withMessageContext({
+                    text: outgoingMessageText,
+                    context: buildOutgoingMessageContext(
+                      boundAttachmentIds(turnAttachmentsResult.value, composerAttachmentsSnapshot),
+                    ),
+                  }),
+                },
+                modelSelection: ctxSelectedModelSelection,
+                titleSeed: title,
+                runtimeMode,
+                interactionMode: DEFAULT_INTERACTION_MODE,
+                dispatchMode: turnDispatchMode,
+                ...(freshArm === undefined ? {} : { freshContext: true }),
+                ...(bootstrap ? { bootstrap } : {}),
+                createdAt: messageCreatedAt,
+              },
+            });
       if (backgroundThreadRef) {
         try {
           backgroundDraftOpened = Boolean(

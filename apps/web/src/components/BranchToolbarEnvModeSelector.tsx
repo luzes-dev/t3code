@@ -1,13 +1,16 @@
 import { ComposerSelectControl } from "./chat/ComposerControl";
 import { ComposerContextLabel } from "./ComposerContextLabel";
-import { FolderGit2Icon, FolderGitIcon, FolderIcon } from "lucide-react";
+import { CloudIcon, FolderGit2Icon, FolderGitIcon, FolderIcon } from "lucide-react";
+import type { CloudSandboxChatTarget } from "@t3tools/contracts";
 import { memo, type MouseEvent as ReactMouseEvent } from "react";
 
 import {
   resolveCurrentWorkspaceLabel,
   resolveEnvModeLabel,
   resolveLockedWorkspaceLabel,
+  sandboxPickerValue,
   type EnvMode,
+  type SandboxPickerItem,
 } from "./BranchToolbar.logic";
 import { useComposerMenuProps } from "./chat/composerEventScope";
 import { PreviousWorktreeItemContent } from "./PreviousWorktreeItemContent";
@@ -35,6 +38,10 @@ interface BranchToolbarEnvModeSelectorProps {
   previousWorktreeLabel?: string | null;
   previousWorktreeBranch?: string | null;
   onUsePreviousWorktree?: () => void;
+  /** Sandbox run targets for a new chat; empty hides the group. */
+  sandboxItems?: ReadonlyArray<SandboxPickerItem>;
+  sandboxTarget?: CloudSandboxChatTarget | null;
+  onSandboxTargetChange?: (target: CloudSandboxChatTarget | null) => void;
 }
 
 export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSelector({
@@ -46,7 +53,13 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
   previousWorktreeLabel,
   previousWorktreeBranch = null,
   onUsePreviousWorktree,
+  sandboxItems = [],
+  sandboxTarget = null,
+  onSandboxTargetChange,
 }: BranchToolbarEnvModeSelectorProps) {
+  const selectedSandbox = sandboxItems.find(
+    (item) => item.value === sandboxPickerValue(sandboxTarget),
+  );
   const composerFloatingLayerProps = useComposerMenuProps();
   const shortcutLabel = shortcutLabelForCommand(
     useAtomValue(primaryServerKeybindingsAtom),
@@ -62,6 +75,7 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
     ...(showPreviousWorktree && previousWorktreeLabel
       ? [{ value: PREVIOUS_WORKTREE_SELECT_VALUE, label: previousWorktreeLabel }]
       : []),
+    ...sandboxItems.map(({ value, label }) => ({ value, label })),
   ];
 
   const stopContextMenuMouseDown = (event: ReactMouseEvent) => {
@@ -107,8 +121,14 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
   return (
     <Select
       modal={false}
-      value={effectiveEnvMode}
+      value={selectedSandbox?.value ?? effectiveEnvMode}
       onValueChange={(value: string | null) => {
+        const sandbox = sandboxItems.find((item) => item.value === value);
+        if (sandbox !== undefined) {
+          onSandboxTargetChange?.(sandbox.target);
+          return;
+        }
+        onSandboxTargetChange?.(null);
         if (value === PREVIOUS_WORKTREE_SELECT_VALUE) {
           onUsePreviousWorktree?.();
           return;
@@ -130,7 +150,9 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
             />
           }
         >
-          {effectiveEnvMode === "worktree" ? (
+          {selectedSandbox !== undefined ? (
+            <CloudIcon className="size-3" />
+          ) : effectiveEnvMode === "worktree" ? (
             <FolderGit2Icon className="size-3" />
           ) : activeWorktreePath ? (
             <FolderGitIcon className="size-3" />
@@ -142,9 +164,11 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
           </ComposerContextLabel>
         </TooltipTrigger>
         <TooltipPopup>
-          {effectiveEnvMode === "worktree"
-            ? resolveEnvModeLabel("worktree")
-            : resolveCurrentWorkspaceLabel(activeWorktreePath)}
+          {selectedSandbox !== undefined
+            ? selectedSandbox.label
+            : effectiveEnvMode === "worktree"
+              ? resolveEnvModeLabel("worktree")
+              : resolveCurrentWorkspaceLabel(activeWorktreePath)}
           {shortcutLabel ? ` · ${shortcutLabel}` : null}
         </TooltipPopup>
       </Tooltip>
@@ -177,6 +201,19 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
             </SelectItem>
           ) : null}
         </SelectGroup>
+        {sandboxItems.length > 0 ? (
+          <SelectGroup>
+            <SelectGroupLabel>Sandbox</SelectGroupLabel>
+            {sandboxItems.map((item) => (
+              <SelectItem key={item.value} value={item.value}>
+                <span className="inline-flex items-center gap-1.5">
+                  <CloudIcon className="size-3" />
+                  {item.label}
+                </span>
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        ) : null}
       </SelectPopup>
     </Select>
   );

@@ -532,8 +532,9 @@ const make = Effect.gen(function* () {
       .pipe(Effect.mapError(chatError("Could not read the chat.")));
     const remembered = yield* projectDefault(thread.projectId);
     if (remembered !== null) return yield* apply(row.value, remembered);
-    yield* stop(row.value);
+    // Pending first, so a client opening the settled chat asks while the follower stops.
     yield* setSettle(threadId, "pending");
+    yield* stop(row.value);
   });
 
   const resolveSettle = Effect.fn("SandboxChats.resolveSettle")(function* (

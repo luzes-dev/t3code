@@ -20,6 +20,7 @@ import {
 import { usePullRequestDraftThread } from "./chat/usePullRequestDraftThread";
 import { usePullRequestLinking } from "../hooks/usePullRequestLinking";
 import { useComposerSelection } from "./chat/useComposerSelection";
+import { SandboxSettleCard } from "./chat/SandboxSettleCard";
 import { useProjectCloneBanner } from "./chat/useProjectCloneBanner";
 import { useAttachmentPreviewHandoff } from "./chat/useAttachmentPreviewHandoff";
 import {
@@ -77,6 +78,7 @@ import {
   ProviderInteractionMode,
   resolveIdleCompaction,
   RuntimeMode,
+  SANDBOX_BRIDGE_INSTANCE_ID,
 } from "@t3tools/contracts";
 import {
   canResumeThread,
@@ -3598,6 +3600,15 @@ export default function ChatView(props: ChatViewProps) {
                                     />
                                   ) : null
                                 }
+                              />
+                            ) : null}
+                            {isServerThread &&
+                            serverThread?.modelSelection.instanceId ===
+                              SANDBOX_BRIDGE_INSTANCE_ID &&
+                            serverThread.settledOverride === "settled" ? (
+                              <SandboxSettleCard
+                                environmentId={environmentId}
+                                threadId={threadId}
                               />
                             ) : null}
                             {!composerMounted ? null : (
