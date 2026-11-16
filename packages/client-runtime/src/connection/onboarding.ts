@@ -412,9 +412,11 @@ export const make = Effect.gen(function* () {
                 new ConnectionBlockedError({ reason: "configuration", detail: cause.message }),
             ),
           );
+        // Opening a sandbox is an explicit user action, so a stopped VM resumes now.
         const response = yield* operateCloudSandbox(controller, {
           _tag: "connect",
           resourceId: input.resourceId,
+          resume: true,
         });
         if (response._tag !== "connection")
           return yield* new ConnectionBlockedError({

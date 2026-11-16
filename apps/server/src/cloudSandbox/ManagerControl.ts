@@ -408,6 +408,7 @@ export const makeControl = (
 
   return {
     execute,
+    executeUnlocked,
     artifact,
     executeSource,
     bindOwnerLocked,

@@ -218,12 +218,14 @@ export const make = Effect.gen(function* () {
     function* (input: CloudSandboxTransportInput) {
       const client = yield* HttpClient.HttpClient;
       const digest = yield* Digest.Digest;
-      const publicKey = yield* ensureKey;
       const driver = yield* drivers.create(input.driverKind, {
         apiKey: input.apiKey,
         httpClient: client,
       });
-      yield* ensureCloudSandboxReady(driver, input.sandboxId, input.allowResume);
+      const [publicKey] = yield* Effect.all(
+        [ensureKey, ensureCloudSandboxReady(driver, input.sandboxId, input.allowResume)],
+        { concurrency: "unbounded" },
+      );
       const ssh = yield* driver.registerSshKey(input.sandboxId, publicKey.trim());
       const hostKey = parseSshHostPublicKey(ssh.hostKey);
       if (hostKey === null) {
@@ -267,7 +269,10 @@ export const make = Effect.gen(function* () {
       });
       const bootstrap = yield* manager.ensureEnvironment(target, { issuePairingToken: true });
       const api = yield* HttpApiClient.make(EnvironmentHttpApi, { baseUrl: bootstrap.httpBaseUrl });
-      const descriptor = yield* api.metadata.descriptor();
+      const [descriptor, runtimeState] = yield* Effect.all(
+        [api.metadata.descriptor(), readPersistedServerRuntimeState(config.serverRuntimeStatePath)],
+        { concurrency: "unbounded" },
+      );
       if (
         input.expectedEnvironmentId !== null &&
         descriptor.environmentId !== input.expectedEnvironmentId
@@ -275,7 +280,7 @@ export const make = Effect.gen(function* () {
         return yield* new CloudSandboxManagerError({ reason: "transport" });
       if (!bootstrap.pairingToken)
         return yield* new CloudSandboxManagerError({ reason: "transport" });
-      const token = yield* api.auth.token({
+      const exchange = api.auth.token({
         headers: {},
         payload: {
           grant_type: AuthTokenExchangeGrantType,
@@ -287,7 +292,6 @@ export const make = Effect.gen(function* () {
       const previous = entries.get(input.resourceId);
       if (previous) yield* Scope.close(previous.scope, Exit.void);
       const reverseScope = yield* Scope.fork(scope);
-      const runtimeState = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath);
       const controllerPort = Option.isSome(runtimeState) ? runtimeState.value.port : config.port;
       if (controllerPort <= 0) return yield* new CloudSandboxManagerError({ reason: "transport" });
       const args = [
@@ -304,26 +308,33 @@ export const make = Effect.gen(function* () {
         "--",
         yield* buildSshHostSpecEffect(target),
       ];
-      const reverse = yield* spawner
-        .spawn(ChildProcess.make(yield* resolveSshCommand, args))
-        .pipe(Effect.provideService(Scope.Scope, reverseScope));
-      entries.set(input.resourceId, {
-        target,
-        scope: reverseScope,
-        running: reverse.isRunning.pipe(Effect.orElseSucceed(() => false)),
-        ready: api.metadata.descriptor().pipe(
-          Effect.map((current) => current.environmentId === descriptor.environmentId),
-          Effect.orElseSucceed(() => false),
-        ),
+      const tunnel = Effect.gen(function* () {
+        const reverse = yield* spawner
+          .spawn(ChildProcess.make(yield* resolveSshCommand, args))
+          .pipe(Effect.provideService(Scope.Scope, reverseScope));
+        entries.set(input.resourceId, {
+          target,
+          scope: reverseScope,
+          running: reverse.isRunning.pipe(Effect.orElseSucceed(() => false)),
+          ready: api.metadata.descriptor().pipe(
+            Effect.map((current) => current.environmentId === descriptor.environmentId),
+            Effect.orElseSucceed(() => false),
+          ),
+        });
+        yield* runSshCommand(target, cloudSandboxSourceProbe).pipe(
+          Effect.retry({ schedule: Schedule.spaced("100 millis"), times: 20 }),
+        );
       });
-      yield* runSshCommand(target, cloudSandboxSourceProbe).pipe(
-        Effect.retry({ schedule: Schedule.spaced("100 millis"), times: 20 }),
+      // The token exchange, the reverse tunnel, and the peer credential are independent round trips.
+      const [token, , pairingToken] = yield* Effect.all(
+        [exchange, tunnel, issuePairingToken(target)],
+        { concurrency: "unbounded" },
       );
       pendingTargets.delete(input.resourceId);
       return {
         httpBaseUrl: bootstrap.httpBaseUrl,
         bearerToken: token.access_token,
-        pairingToken: yield* issuePairingToken(target),
+        pairingToken,
         environmentId: descriptor.environmentId,
         label: descriptor.label,
       };

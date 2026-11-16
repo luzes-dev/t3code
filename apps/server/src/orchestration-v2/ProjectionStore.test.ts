@@ -1671,11 +1671,19 @@ it.effect(
         payload: run,
       });
       const task = {
-        ...initial.turnItems[0]!,
         id: TurnItemId.make("item:pending-work:task"),
+        threadId,
         runId: run.id,
         nodeId: run.rootNodeId,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
         ordinal: 1,
+        title: "Review",
+        startedAt: at,
+        completedAt: null,
+        updatedAt: at,
         type: "subagent" as const,
         status: "running" as const,
         subagentId: NodeId.make("node:pending-work:task"),
@@ -1714,7 +1722,7 @@ it.effect(
         type: "turn-item.updated",
         threadId,
         occurredAt: at,
-        payload: { ...task, status: "completed", completedAt: at },
+        payload: { ...task, status: "completed" as const, completedAt: at },
       });
       assert.isFalse(yield* store.hasPendingWork());
     }).pipe(Effect.provide(layerTest)),

@@ -173,7 +173,11 @@ export const ManagedCloudSandboxOperationResult = Schema.Union([
 export type ManagedCloudSandboxOperationResult = typeof ManagedCloudSandboxOperationResult.Type;
 export const ManagedCloudSandboxOperation = Schema.Union([
   Schema.TaggedStruct("provision", ManagedCloudSandboxProvisionInput.fields),
-  Schema.TaggedStruct("connect", { resourceId: ManagedCloudSandboxResourceId }),
+  // `resume` marks a user opening the sandbox's thread: a stopped VM resumes instead of failing.
+  Schema.TaggedStruct("connect", {
+    resourceId: ManagedCloudSandboxResourceId,
+    resume: Schema.optionalKey(Schema.Boolean),
+  }),
   Schema.TaggedStruct("get", { resourceId: ManagedCloudSandboxResourceId }),
   Schema.TaggedStruct("list", {}),
   Schema.TaggedStruct("execute", {

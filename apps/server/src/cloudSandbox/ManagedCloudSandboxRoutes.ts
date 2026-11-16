@@ -107,7 +107,7 @@ const management = Effect.gen(function* () {
         );
     case "connect":
       return yield* manager
-        .connect(input.resourceId)
+        .connect(input.resourceId, { resume: input.resume === true })
         .pipe(
           Effect.flatMap((route) =>
             HttpServerResponse.json({ _tag: "connection", connection: route.connection }),

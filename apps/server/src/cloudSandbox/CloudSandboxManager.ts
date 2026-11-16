@@ -57,8 +57,13 @@ export class CloudSandboxManager extends Context.Service<
     readonly provision: (
       input: ManagedCloudSandboxProvisionInput,
     ) => Effect.Effect<ManagedCloudSandboxRoute, Store.CloudSandboxManagerError>;
+    /**
+     * Connects a running sandbox. `resume` is the explicit open of a user action: a stopped VM
+     * resumes under the same lock and budget checks as an execute resume instead of failing.
+     */
     readonly connect: (
       resourceId: ManagedCloudSandboxResourceId,
+      options?: { readonly resume?: boolean },
     ) => Effect.Effect<ManagedCloudSandboxRoute, Store.CloudSandboxManagerError>;
     readonly route: (
       resourceId: ManagedCloudSandboxResourceId,
@@ -113,7 +118,7 @@ export const make = Effect.gen(function* () {
   const { locks, transport, store, scope, requireRecord, publicResource } = rt;
   const reservations = makeReservations(rt);
   const connections = makeConnections(rt, reservations);
-  const { route, connect, disconnect, sourceContext } = connections;
+  const { route, connectUnlocked, disconnect, sourceContext } = connections;
   const allocation = makeAllocation(rt, connections, reservations);
   const { provision, fork, release } = allocation;
   // Optionally wired: only controllers provide the ledger layer; fixtures and
@@ -122,7 +127,30 @@ export const make = Effect.gen(function* () {
     yield* Effect.serviceOption(FollowerHostSettings.FollowerHostSettingsLedger),
   );
   const control = makeControl(rt, connections, allocation, reservations, followerHostSettings);
-  const { execute, artifact, executeSource, bindOwnerLocked } = control;
+  const { execute, executeUnlocked, artifact, executeSource, bindOwnerLocked } = control;
+  const connect = Effect.fn("CloudSandboxManager.connectLocked")(
+    (id: ManagedCloudSandboxResourceId, options?: { readonly resume?: boolean }) =>
+      locks.withLock(
+        id,
+        options?.resume === true
+          ? connectUnlocked(id, false).pipe(
+              Effect.catchIf(
+                (error) => error.reason === "transport",
+                (error) =>
+                  rt
+                    .requireRecord(id)
+                    .pipe(
+                      Effect.flatMap((record) =>
+                        record.power === "stopped"
+                          ? executeUnlocked(id, { _tag: "resume" }).pipe(Effect.andThen(route(id)))
+                          : Effect.fail(error),
+                      ),
+                    ),
+              ),
+            )
+          : connectUnlocked(id, false),
+      ),
+  );
   const { reconcile } = makeReconciler(rt, connections, allocation);
   yield* reconcile.pipe(
     Effect.catchCause(() => Effect.logWarning("Managed cloud reconciliation will retry.")),

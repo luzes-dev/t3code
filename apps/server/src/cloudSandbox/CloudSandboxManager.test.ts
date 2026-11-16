@@ -273,7 +273,7 @@ it.effect("resumes a stopped VM only for an explicit execute resume", () =>
   }).pipe(Effect.scoped),
 );
 
-it.effect("keeps public connect from waking a stopped VM", () =>
+it.effect("keeps public connect from waking a stopped VM unless the user opens it", () =>
   Effect.gen(function* () {
     const f = fixture();
     const manager = yield* f.manager;
@@ -298,6 +298,20 @@ it.effect("keeps public connect from waking a stopped VM", () =>
     });
     expect((yield* manager.get(id)).phase).toBe("stopped");
     expect(f.resumes()).toBe(0);
+
+    // Opening its thread is explicit: the VM resumes now, under the same budget gate.
+    f.setBudget(0);
+    expect(yield* manager.connect(id, { resume: true }).pipe(Effect.result)).toMatchObject({
+      _tag: "Failure",
+      failure: { reason: "budget" },
+    });
+    expect(f.resumes()).toBe(0);
+    f.setBudget(null);
+    expect((yield* manager.connect(id, { resume: true })).connection.resourceId).toBe(id);
+    expect(f.resumes()).toBe(1);
+    expect((yield* manager.get(id)).phase).toBe("connected");
+    yield* manager.connect(id, { resume: true });
+    expect(f.resumes()).toBe(1);
   }).pipe(Effect.scoped),
 );
 
