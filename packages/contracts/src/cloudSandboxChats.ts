@@ -1,5 +1,6 @@
 import * as Schema from "effect/Schema";
 import { MessageId, ProjectId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { ChatAttachment, UploadChatAttachment } from "./chatAttachment.ts";
 import { SandboxProfileId } from "./environment.ts";
 import { ManagedCloudSandboxResourceId } from "./managedCloudSandbox.ts";
 import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
@@ -24,6 +25,10 @@ export const CloudSandboxChatStartInput = Schema.Struct({
     messageId: MessageId,
     text: TrimmedNonEmptyString,
     title: TrimmedNonEmptyString,
+    /** Uploads are stored on the host first; the bridge forwards images to the sandbox. */
+    attachments: Schema.optionalKey(
+      Schema.Array(Schema.Union([ChatAttachment, UploadChatAttachment])),
+    ),
   }),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,

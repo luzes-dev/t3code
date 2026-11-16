@@ -2,6 +2,7 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
+  type CloudSandboxChatStartInput,
   EnvironmentId,
   type ManagedCloudSandboxControlOperation,
   type ManagedCloudSandboxProvisionInput,
@@ -191,7 +192,11 @@ const harness = () => {
     Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
   );
 
-  const startChat = (threadId: ThreadId, target: "new" | "project") =>
+  const startChat = (
+    threadId: ThreadId,
+    target: "new" | "project",
+    attachments?: CloudSandboxChatStartInput["message"]["attachments"],
+  ) =>
     Effect.gen(function* () {
       const chats = yield* SandboxChats.SandboxChats;
       const done = yield* Deferred.make<void>();
@@ -204,6 +209,7 @@ const harness = () => {
           messageId: MessageId.make(`message-${threadId}`),
           text: "Fix the build",
           title: "Fix the build",
+          ...(attachments === undefined ? {} : { attachments }),
         },
         runtimeMode: "full-access",
         interactionMode: "default",
@@ -236,7 +242,15 @@ it.effect(
     const h = harness();
     const threadId = ThreadId.make("thread-new");
     return Effect.gen(function* () {
-      yield* h.startChat(threadId, "new");
+      yield* h.startChat(threadId, "new", [
+        {
+          type: "image",
+          name: "screen.png",
+          mimeType: "image/png",
+          sizeBytes: 3,
+          dataUrl: "data:image/png;base64,YWJj",
+        },
+      ]);
       expect(h.provisions).toHaveLength(1);
       expect(h.provisions[0]?.ownership).toEqual({
         sourceThreadId: threadId,
@@ -246,6 +260,10 @@ it.effect(
       expect(create).toMatchObject({ modelSelection: { instanceId: "sandboxes" } });
       const message = h.commands.find((command) => command.type === "message.dispatch");
       expect(message).toMatchObject({ dispatchMode: { type: "defer_start" } });
+      // The upload is stored on the host like any chat image; the bridge forwards it from there.
+      const [stored] = message?.type === "message.dispatch" ? message.attachments : [];
+      expect(stored).toMatchObject({ type: "image", name: "screen.png", sizeBytes: 3 });
+      expect(stored).not.toHaveProperty("dataUrl");
       expect(h.commands.at(-1)?.type).toBe("prepared-run.release");
       const link = JSON.parse(
         new TextDecoder().decode(h.secrets.get(bridgeLinkSecretName(threadId))),
@@ -279,7 +297,7 @@ it.effect("reuses the project's sandbox instead of provisioning a second one", (
   }).pipe(Effect.provide(h.layer), registrar, Effect.scoped);
 });
 
-it.effect("asks once on settle, keeps by stopping, and remembers the answer", () => {
+it.effect("asks once on settle, keeps by stopping, resumes on open, and remembers", () => {
   const h = harness();
   const first = ThreadId.make("thread-keep");
   const second = ThreadId.make("thread-keep-later");
@@ -291,11 +309,16 @@ it.effect("asks once on settle, keeps by stopping, and remembers the answer", ()
     expect(yield* chats.state(first)).toMatchObject({ settle: "pending", projectDefault: null });
     // Without an answer the follower stops instead of billing, exactly once.
     expect(h.controls.map(({ operation }) => operation._tag)).toEqual(["stop"]);
+    // Opening a chat that still owes an answer asks first; it does not wake the sandbox.
+    yield* chats.open(first);
+    expect(h.resumes).toEqual([]);
 
     const kept = yield* chats.resolveSettle({ threadId: first, choice: "keep", remember: true });
     expect(kept).toMatchObject({ settle: "kept", projectDefault: "keep" });
     expect(h.binds).toEqual([{ id: h.provisions[0]?.operationId, retention: "stop-and-retain" }]);
     expect(h.released).toEqual([]);
+    yield* chats.open(first);
+    expect(h.resumes).toEqual([h.provisions[0]?.operationId]);
 
     yield* h.startChat(second, "new");
     yield* chats.onSettled(second);
@@ -317,7 +340,9 @@ it.effect("deletes a settled chat's sandbox and its link when the user says dele
     expect(h.secrets.has(bridgeLinkSecretName(threadId))).toBe(false);
     // Answered: a later settle of the same pairing asks nothing and deletes nothing more.
     yield* chats.onSettled(threadId);
+    yield* chats.open(threadId);
     expect(h.released).toHaveLength(1);
+    expect(h.resumes).toEqual([]);
   }).pipe(Effect.provide(h.layer), registrar, Effect.scoped);
 });
 

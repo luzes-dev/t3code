@@ -67,6 +67,7 @@ import { AppText as Text } from "../../components/ui/AppText";
 import { threadContextsOutsideEnvironment } from "@t3tools/shared/composerContextReferences";
 
 import { makeTurnCommandMetadata } from "../../lib/commandMetadata";
+import { prepareTurnAttachments } from "../../lib/attachmentUpload";
 
 import {
   clearComposerDraftContent,
@@ -702,6 +703,19 @@ export function NewTaskDraftScreen(props: {
       if (initialMessageText.length === 0) return null;
       flow.setSubmitting(true);
       const threadId = ThreadId.make(creationMetadata.threadId);
+      const prepared = await settlePromise(() =>
+        prepareTurnAttachments({
+          environmentId: selectedProject.environmentId,
+          attachments: draft.attachments,
+          supportsImageUploads: true,
+        }),
+      );
+      if (AsyncResult.isFailure(prepared) || prepared.value.status !== "ready") {
+        flow.setSubmitting(false);
+        if (AsyncResult.isFailure(prepared))
+          Dialog.alert("Could not upload attachments", "Try sending the task again.");
+        return null;
+      }
       const started = await startSandboxChat({
         environmentId: selectedProject.environmentId,
         input: {
@@ -712,6 +726,7 @@ export function NewTaskDraftScreen(props: {
             messageId: MessageId.make(creationMetadata.messageId),
             text: initialMessageText,
             title: initialMessageText.slice(0, 80).trim(),
+            attachments: prepared.value.attachments,
           },
           runtimeMode: flow.runtimeMode,
           interactionMode: "default",

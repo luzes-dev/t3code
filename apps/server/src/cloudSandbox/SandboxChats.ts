@@ -33,6 +33,7 @@ import * as Digest from "effect/crypto/Digest";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
@@ -42,6 +43,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 import { FetchHttpClient } from "effect/http";
 
+import { persistChatAttachments } from "../assets/PersistChatAttachments.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as Threads from "../orchestration-v2/ThreadManagementService.ts";
@@ -109,6 +111,8 @@ export class SandboxChats extends Context.Service<
     ) => Effect.Effect<CloudSandboxChatState, CloudSandboxChatError>;
     /** Applies a settle event for a sandbox chat; exposed for the event follower and tests. */
     readonly onSettled: (threadId: ThreadId) => Effect.Effect<void, CloudSandboxChatError>;
+    /** Opening a chat is an explicit action, so its stopped sandbox resumes now. */
+    readonly open: (threadId: ThreadId) => Effect.Effect<void, CloudSandboxChatError>;
     /** Seeds the bridge instance and follows run and settle events; call once per server start. */
     readonly start: () => Effect.Effect<void, never, Scope.Scope>;
   }
@@ -128,6 +132,9 @@ const make = Effect.gen(function* () {
   const profiles = yield* Profiles.CloudSandboxProfiles;
   const transfer = yield* ProjectTransfer.CloudSandboxProjectTransfer;
   const registerProject = yield* SandboxProjectRegistrar;
+  const attachmentServices = yield* Effect.context<
+    FileSystem.FileSystem | Path.Path | ServerConfig.ServerConfig
+  >();
 
   const hash = (value: string) =>
     digest
@@ -390,6 +397,25 @@ const make = Effect.gen(function* () {
     }
   });
 
+  const storedAttachments = Effect.fn("SandboxChats.storedAttachments")(function* (
+    input: CloudSandboxChatStartInput,
+  ) {
+    const attachments = input.message.attachments ?? [];
+    const uploads = attachments.filter((attachment) => "dataUrl" in attachment);
+    const persisted = yield* persistChatAttachments({
+      threadId: input.threadId,
+      messageId: input.message.messageId,
+      attachments: uploads,
+    }).pipe(
+      Effect.provide(attachmentServices),
+      Effect.mapError((error) => new CloudSandboxChatError({ message: error.message })),
+    );
+    let next = 0;
+    return attachments.map((attachment) =>
+      "dataUrl" in attachment ? persisted[next++]! : attachment,
+    );
+  });
+
   const startChat = Effect.fn("SandboxChats.startChat")(function* (
     input: CloudSandboxChatStartInput,
   ) {
@@ -455,7 +481,7 @@ const make = Effect.gen(function* () {
         threadId: input.threadId,
         messageId: input.message.messageId,
         text: input.message.text,
-        attachments: [],
+        attachments: yield* storedAttachments(input),
         titleSeed: input.message.title,
         modelSelection: bridgeModelSelection,
         dispatchMode: { type: "defer_start" },
@@ -613,6 +639,13 @@ const make = Effect.gen(function* () {
     }),
     resolveSettle,
     onSettled,
+    open: Effect.fn("SandboxChats.open")(function* (threadId) {
+      const row = yield* readRow(threadId);
+      // A pending answer asks first; a deleted sandbox has nothing to resume.
+      if (Option.isNone(row) || row.value.settle === "pending" || row.value.settle === "deleted")
+        return;
+      yield* resumeFor(threadId);
+    }),
     start: Effect.fn("SandboxChats.start")(function* () {
       yield* seedInstance.pipe(
         Effect.catchCause((cause) =>

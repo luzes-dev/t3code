@@ -15,7 +15,7 @@ import { parseThreadKey, threadKey } from "@t3tools/client-runtime/state/entitie
 import { createThreadVisitTracker } from "@t3tools/client-runtime/state/thread-visits";
 import { useChildThreadInputs, useThreadReportedModelSelection } from "../../state/entities";
 import { SANDBOX_BRIDGE_INSTANCE_ID } from "@t3tools/contracts";
-import { SandboxSettleCard } from "./SandboxSettleCard";
+import { SandboxSettleCard, useResumeSandboxChat } from "./SandboxSettleCard";
 import { UsageLimitRecoveryCard } from "./UsageLimitRecoveryCard";
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import {
@@ -410,6 +410,11 @@ function ThreadDetailBody(
   },
 ) {
   const usesNativeWorkspaceColumns = useNativeWorkspaceColumnsSupported();
+  useResumeSandboxChat(
+    props.environmentId,
+    props.selectedThread.id,
+    props.selectedThread.modelSelection.instanceId === SANDBOX_BRIDGE_INSTANCE_ID,
+  );
   const { layout } = useAdaptiveWorkspaceLayout();
   const deviceType = useDeviceType();
   const workspace = useWorkspaceTabs();

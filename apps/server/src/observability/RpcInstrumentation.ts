@@ -210,6 +210,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.cloudSandboxChatStart]: "cloudSandbox",
   [WS_METHODS.cloudSandboxChatState]: "cloudSandbox",
   [WS_METHODS.cloudSandboxChatResolveSettle]: "cloudSandbox",
+  [WS_METHODS.cloudSandboxChatOpen]: "cloudSandbox",
   [WS_METHODS.cloudSandboxProfilesSave]: "cloudSandbox",
   [WS_METHODS.cloudSandboxProfilesDelete]: "cloudSandbox",
   [WS_METHODS.cloudSandboxProfilesTest]: "cloudSandbox",

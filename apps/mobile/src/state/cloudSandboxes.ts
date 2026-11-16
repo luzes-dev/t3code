@@ -68,6 +68,11 @@ export const sandboxChatResolveSettle = createEnvironmentRpcCommand(connectionAt
     ),
 });
 
+export const sandboxChatOpen = createEnvironmentRpcCommand(connectionAtomRuntime, {
+  label: "mobile:cloud-sandbox-chats:open",
+  tag: WS_METHODS.cloudSandboxChatOpen,
+});
+
 /** The sandbox a new task's draft will run on; null runs it on the checkout or a worktree. */
 export const draftSandboxTargetAtom = Atom.family((_draftKey: string) =>
   Atom.make<SandboxPickerItem | null>(null).pipe(Atom.keepAlive),

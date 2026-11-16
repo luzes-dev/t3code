@@ -20,7 +20,7 @@ import {
 import { usePullRequestDraftThread } from "./chat/usePullRequestDraftThread";
 import { usePullRequestLinking } from "../hooks/usePullRequestLinking";
 import { useComposerSelection } from "./chat/useComposerSelection";
-import { SandboxSettleCard } from "./chat/SandboxSettleCard";
+import { SandboxSettleCard, useResumeSandboxChat } from "./chat/SandboxSettleCard";
 import { useProjectCloneBanner } from "./chat/useProjectCloneBanner";
 import { useAttachmentPreviewHandoff } from "./chat/useAttachmentPreviewHandoff";
 import {
@@ -825,6 +825,11 @@ export default function ChatView(props: ChatViewProps) {
     : undefined;
   const isServerThread = serverThread !== null;
   const activeThread = isServerThread ? serverThread : localDraftThread;
+  useResumeSandboxChat(
+    environmentId,
+    threadId,
+    serverThread?.modelSelection.instanceId === SANDBOX_BRIDGE_INSTANCE_ID,
+  );
   const serverLatestRun =
     serverProjection === null ? null : deriveLatestThreadRun(serverProjection);
   const serverActivityRun =

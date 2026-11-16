@@ -1,10 +1,14 @@
 import type { CloudSandboxSettleChoice, EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { useState } from "react";
+import { useEffect, useEffectEvent, useState } from "react";
 import { Pressable, View } from "react-native";
 
 import { AppText as Text } from "../../components/ui/AppText";
 import { Button } from "../../components/ui/Button";
-import { sandboxChatResolveSettle, sandboxChatState } from "../../state/cloudSandboxes";
+import {
+  sandboxChatOpen,
+  sandboxChatResolveSettle,
+  sandboxChatState,
+} from "../../state/cloudSandboxes";
 import { useEnvironmentQuery } from "../../state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
 
@@ -60,4 +64,20 @@ export function SandboxSettleCard({
       </Pressable>
     </View>
   );
+}
+
+/** Opening a sandbox chat resumes its stopped sandbox, so the next message does not wait on it. */
+export function useResumeSandboxChat(
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+  enabled: boolean,
+) {
+  const run = useAtomCommand(sandboxChatOpen, { reportFailure: false });
+  const open = useEffectEvent((target: { environmentId: EnvironmentId; threadId: ThreadId }) => {
+    void run({ environmentId: target.environmentId, input: { threadId: target.threadId } });
+  });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- asks the server to resume this chat's sandbox once per opened thread
+  useEffect(() => {
+    if (enabled) open({ environmentId, threadId });
+  }, [enabled, environmentId, threadId]);
 }

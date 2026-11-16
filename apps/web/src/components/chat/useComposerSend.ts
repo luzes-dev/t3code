@@ -1306,6 +1306,7 @@ export function useComposerSend(input: ComposerSendInput) {
                   messageId: messageIdForSend,
                   text: outgoingMessageText,
                   title,
+                  attachments: turnAttachmentsResult.value,
                 },
                 runtimeMode,
                 interactionMode: DEFAULT_INTERACTION_MODE,

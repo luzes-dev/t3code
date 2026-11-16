@@ -550,6 +550,7 @@ export const WS_METHODS = {
   cloudSandboxChatStart: "cloudSandbox.chats.start",
   cloudSandboxChatState: "cloudSandbox.chats.state",
   cloudSandboxChatResolveSettle: "cloudSandbox.chats.resolveSettle",
+  cloudSandboxChatOpen: "cloudSandbox.chats.open",
   cloudSandboxProfilesList: "cloudSandbox.profiles.list",
   cloudSandboxProfilesSave: "cloudSandbox.profiles.save",
   cloudSandboxProfilesDelete: "cloudSandbox.profiles.delete",
@@ -926,6 +927,12 @@ const WsCloudSandboxChatStateRpc = Rpc.make(WS_METHODS.cloudSandboxChatState, {
 const WsCloudSandboxChatResolveSettleRpc = Rpc.make(WS_METHODS.cloudSandboxChatResolveSettle, {
   payload: CloudSandboxChatResolveInput,
   success: CloudSandboxChatState,
+  error: Schema.Union([CloudSandboxChatError, EnvironmentAuthorizationError]),
+});
+
+const WsCloudSandboxChatOpenRpc = Rpc.make(WS_METHODS.cloudSandboxChatOpen, {
+  payload: Schema.Struct({ threadId: ThreadId }),
+  success: Schema.Void,
   error: Schema.Union([CloudSandboxChatError, EnvironmentAuthorizationError]),
 });
 
@@ -2207,6 +2214,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsCloudSandboxChatStartRpc,
   WsCloudSandboxChatStateRpc,
   WsCloudSandboxChatResolveSettleRpc,
+  WsCloudSandboxChatOpenRpc,
   WsCloudSandboxProfilesListRpc,
   WsCloudSandboxProfilesSaveRpc,
   WsCloudSandboxProfilesDeleteRpc,

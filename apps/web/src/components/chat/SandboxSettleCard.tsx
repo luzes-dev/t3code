@@ -1,8 +1,12 @@
 import type { CloudSandboxSettleChoice, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { CloudIcon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useEffectEvent, useState } from "react";
 
-import { sandboxChatResolveSettle, sandboxChatState } from "~/state/cloudSandboxChats";
+import {
+  sandboxChatOpen,
+  sandboxChatResolveSettle,
+  sandboxChatState,
+} from "~/state/cloudSandboxChats";
 import { useEnvironmentQuery } from "~/state/query";
 import { useOrchestrationCommand } from "~/state/use-orchestration-command";
 import { Button } from "../ui/button";
@@ -60,4 +64,20 @@ export function SandboxSettleCard({
       </div>
     </div>
   );
+}
+
+/** Opening a sandbox chat resumes its stopped sandbox, so the next message does not wait on it. */
+export function useResumeSandboxChat(
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+  enabled: boolean,
+) {
+  const run = useOrchestrationCommand(sandboxChatOpen, { reportFailure: false });
+  const open = useEffectEvent((target: { environmentId: EnvironmentId; threadId: ThreadId }) => {
+    void run({ environmentId: target.environmentId, input: { threadId: target.threadId } });
+  });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- asks the server to resume this chat's sandbox once per opened thread
+  useEffect(() => {
+    if (enabled) open({ environmentId, threadId });
+  }, [enabled, environmentId, threadId]);
 }

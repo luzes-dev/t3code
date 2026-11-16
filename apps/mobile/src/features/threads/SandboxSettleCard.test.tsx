@@ -27,6 +27,7 @@ vi.mock("../../components/ui/Button", () => ({
 }));
 vi.mock("../../state/cloudSandboxes", () => ({
   sandboxChatResolveSettle: {},
+  sandboxChatOpen: {},
   sandboxChatState: () => ({}),
 }));
 vi.mock("../../state/query", () => ({
