@@ -19,6 +19,8 @@ import { WS_METHODS } from "./rpc.ts";
 export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.providerAuthRemoveMethod]: AuthProvidersManageScope,
   [WS_METHODS.cloudSandboxControl]: AuthOrchestrationOperateScope,
+  [WS_METHODS.cloudSandboxChatStart]: AuthOrchestrationOperateScope,
+  [WS_METHODS.cloudSandboxChatResolveSettle]: AuthOrchestrationOperateScope,
   [WS_METHODS.cloudSandboxProfilesSave]: AuthSettingsWriteScope,
   [WS_METHODS.cloudSandboxProfilesDelete]: AuthSettingsWriteScope,
   [WS_METHODS.cloudSandboxProfilesTest]: AuthSettingsWriteScope,

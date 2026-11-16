@@ -14,6 +14,8 @@ import {
   type OrchestrationV2Checkpoint,
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadStreamItem,
+  type ProjectMutation,
+  ThreadId,
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
@@ -130,10 +132,9 @@ const issueTicket = Effect.fn("SandboxBridge.issueTicket")(function* (link: Sand
   return Redacted.value(response.ticket);
 });
 
-export const connectSandbox = Effect.fn("SandboxBridge.connectSandbox")(function* (
+const openSandboxRpc = Effect.fn("SandboxBridge.openSandboxRpc")(function* (
   link: SandboxBridgeLink,
-): Effect.fn.Return<SandboxSession, SandboxBridgeError, Scope.Scope | HttpClient.HttpClient> {
-  const http = yield* HttpClient.HttpClient;
+) {
   const ticket = yield* issueTicket(link);
   const protocol = yield* Layer.build(
     Layer.effect(
@@ -154,7 +155,29 @@ export const connectSandbox = Effect.fn("SandboxBridge.connectSandbox")(function
       ),
     ),
   );
-  const client = yield* RpcClient.make(WsRpcGroup).pipe(Effect.provide(protocol));
+  return yield* RpcClient.make(WsRpcGroup).pipe(Effect.provide(protocol));
+});
+
+/** Registers a project on the sandbox, for the host to launch its chat threads in. */
+export const createSandboxProject = Effect.fn("SandboxBridge.createSandboxProject")(function* (
+  link: Omit<SandboxBridgeLink, "sandboxProjectId" | "threadId">,
+  mutation: Extract<ProjectMutation, { readonly type: "project.create" }>,
+) {
+  const client = yield* openSandboxRpc({
+    ...link,
+    threadId: ThreadId.make("project-setup"),
+    sandboxProjectId: mutation.projectId,
+  });
+  return yield* client[WS_METHODS.projectsMutate](mutation).pipe(
+    Effect.mapError(failed(`Sandbox ${link.sandboxId} did not register the project.`)),
+  );
+}, Effect.scoped);
+
+export const connectSandbox = Effect.fn("SandboxBridge.connectSandbox")(function* (
+  link: SandboxBridgeLink,
+): Effect.fn.Return<SandboxSession, SandboxBridgeError, Scope.Scope | HttpClient.HttpClient> {
+  const http = yield* HttpClient.HttpClient;
+  const client = yield* openSandboxRpc(link);
   const config = yield* client[WS_METHODS.serverGetConfig]({}).pipe(
     Effect.mapError(failed(`Sandbox ${link.sandboxId} did not answer.`)),
   );

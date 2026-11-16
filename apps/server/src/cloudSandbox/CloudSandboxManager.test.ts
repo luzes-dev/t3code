@@ -1650,6 +1650,35 @@ it.effect.each(["found", "missing"] as const)(
     }).pipe(Effect.scoped),
 );
 
+it.effect("keeps a chat follower by flipping its retention, and refuses another thread", () =>
+  Effect.gen(function* () {
+    const f = fixture();
+    const manager = yield* f.manager;
+    const id = ManagedCloudSandboxResourceId.make("chat-follower");
+    const owner = {
+      _tag: "thread" as const,
+      hostEnvironmentId: EnvironmentId.make("controller"),
+      threadId: ThreadId.make("chat-thread"),
+    };
+    yield* manager.provision({
+      operationId: id,
+      profile: SandboxProfileId.make("fixture"),
+      sandbox: { name: "chat", size: "small", autoStopMinutes: 15 },
+      ownership: { sourceThreadId: owner.threadId, retention: "delete-on-completion" },
+    });
+    expect(yield* manager.bindOwner(id, owner, "stop-and-retain")).toMatchObject({
+      owner,
+      retention: "stop-and-retain",
+    });
+    expect(
+      yield* manager
+        .bindOwner(id, { ...owner, threadId: ThreadId.make("other-chat") })
+        .pipe(Effect.result),
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "ownership" } });
+    expect(yield* manager.get(id)).toMatchObject({ owner, retention: "stop-and-retain" });
+  }).pipe(Effect.scoped),
+);
+
 it.effect("recovers allocation ownership for a legacy retry without replacing its VM", () =>
   Effect.gen(function* () {
     const f = fixture();

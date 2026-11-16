@@ -1,4 +1,5 @@
 import * as CloudSandboxManager from "./cloudSandbox/CloudSandboxManager.ts";
+import * as SandboxChats from "./cloudSandbox/SandboxChats.ts";
 import * as CloudSandboxProfiles from "./cloudSandbox/CloudSandboxProfiles.ts";
 import { ManagedCloudSandboxControlError } from "@t3tools/contracts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
@@ -1542,6 +1543,7 @@ export const layerWsRpc = (
       const secretResolver = yield* SecretResolver.SecretResolver;
       const peerLinks = yield* PeerLinks.PeerLinks;
       const cloudSandboxes = yield* CloudSandboxManager.CloudSandboxManager;
+      const sandboxChats = yield* SandboxChats.SandboxChats;
       const sandboxProfiles = yield* CloudSandboxProfiles.CloudSandboxProfiles;
       const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
@@ -2655,6 +2657,9 @@ export const layerWsRpc = (
                 }),
             ),
           ),
+        [WS_METHODS.cloudSandboxChatStart]: (input) => sandboxChats.startChat(input),
+        [WS_METHODS.cloudSandboxChatState]: ({ threadId }) => sandboxChats.state(threadId),
+        [WS_METHODS.cloudSandboxChatResolveSettle]: (input) => sandboxChats.resolveSettle(input),
         [WS_METHODS.cloudSandboxProfilesList]: () =>
           sandboxProfiles.list.pipe(Effect.map((profiles) => ({ profiles }))),
         [WS_METHODS.cloudSandboxProfilesSave]: (input) => sandboxProfiles.saveStatus(input),

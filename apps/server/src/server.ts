@@ -7,6 +7,8 @@ import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEve
 import * as ManagedCloudSandboxRoutes from "./cloudSandbox/ManagedCloudSandboxRoutes.ts";
 import * as CloudSandboxPreview from "./cloudSandbox/CloudSandboxPreview.ts";
 import * as CloudSandboxManager from "./cloudSandbox/CloudSandboxManager.ts";
+import * as CloudSandboxProjectTransfer from "./workspace/CloudSandboxProjectTransfer.ts";
+import * as SandboxChats from "./cloudSandbox/SandboxChats.ts";
 import * as CloudSandboxWorkspaces from "./workspace/CloudSandboxWorkspaces.ts";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
 import * as Random from "effect/Random";
@@ -856,6 +858,8 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.effectDiscard(
     RemoteDelegation.RemoteDelegation.pipe(Effect.flatMap((remote) => remote.start())),
   ),
+  // Seeds the sandbox bridge and follows sandbox chats' turns and settles.
+  Layer.effectDiscard(SandboxChats.SandboxChats.pipe(Effect.flatMap((chats) => chats.start()))),
   // Reclaims finished sandbox workspaces on a timer, like the delegation follower.
   Layer.effectDiscard(
     CloudSandboxWorkspaces.CloudSandboxWorkspaces.pipe(
@@ -881,15 +885,23 @@ const layerMakeRoutes = Layer.mergeAll(
       Effect.gen(function* () {
         const manager = yield* CloudSandboxManager.CloudSandboxManager;
         const profiles = yield* CloudSandboxProfiles.CloudSandboxProfiles;
+        const chats = yield* SandboxChats.SandboxChats;
         const preview = yield* Layer.build(CloudSandboxPreview.layer);
         return Context.make(CloudSandboxManager.CloudSandboxManager, manager).pipe(
           Context.add(CloudSandboxProfiles.CloudSandboxProfiles, profiles),
+          Context.add(SandboxChats.SandboxChats, chats),
           Context.merge(preview),
         );
       }),
     ),
   ),
-  Layer.provide(CloudSandboxProfiles.layer),
+  // Sandbox chats for the routes, the WebSocket handlers, and their event follower above.
+  Layer.provide(
+    SandboxChats.layer.pipe(
+      Layer.provide(CloudSandboxProjectTransfer.layer),
+      Layer.provideMerge(CloudSandboxProfiles.layer),
+    ),
+  ),
   Layer.provide(CloudSandboxManager.layer),
   // delegate_task to a linked environment, from /mcp and the follower above.
   Layer.provide(RemoteDelegation.layer.pipe(Layer.provide(ProjectionStoreV2.layer))),

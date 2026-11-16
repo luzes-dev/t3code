@@ -1,4 +1,5 @@
 import * as CloudSandboxManager from "./cloudSandbox/CloudSandboxManager.ts";
+import * as SandboxChats from "./cloudSandbox/SandboxChats.ts";
 import * as CloudSandboxProfiles from "./cloudSandbox/CloudSandboxProfiles.ts";
 import { CloudSandboxManagerError } from "./cloudSandbox/CloudSandboxStore.ts";
 import * as Schema from "effect/Schema";
@@ -798,6 +799,7 @@ it.effect("shell snapshots omit idle children and older settled threads only on 
 // Build the production RPC layer; unrelated capabilities fail if this test calls them.
 const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(CloudSandboxManager.CloudSandboxManager)({}),
+  Layer.mock(SandboxChats.SandboxChats)({}),
   Layer.mock(CloudSandboxProfiles.CloudSandboxProfiles)({
     list: Effect.succeed([]),
     save: () => Effect.die("not used"),
