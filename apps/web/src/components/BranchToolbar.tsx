@@ -4,8 +4,20 @@ import { readLocalApi } from "../localApi";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { ComposerContextLabel } from "./ComposerContextLabel";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
-import type { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
-import { FolderGit2Icon, FolderGitIcon, FolderIcon, PlusIcon, ScaleIcon } from "lucide-react";
+import type {
+  CloudSandboxChatTarget,
+  EnvironmentId,
+  ProjectId,
+  ThreadId,
+} from "@t3tools/contracts";
+import {
+  CloudIcon,
+  FolderGit2Icon,
+  FolderGitIcon,
+  FolderIcon,
+  PlusIcon,
+  ScaleIcon,
+} from "lucide-react";
 import {
   type Ref,
   type MouseEvent as ReactMouseEvent,
@@ -70,7 +82,11 @@ import { cn } from "~/lib/utils";
 import { observeResize } from "~/lib/observeResize";
 import { useAtom } from "@effect/atom-react";
 import { selectableManagedSandboxesAtom } from "~/connection/cloudSandbox";
-import { resolveSandboxPickerItems } from "@t3tools/client-runtime/state/cloudSandbox";
+import {
+  resolveSandboxPickerItems,
+  sandboxPickerValue,
+  type SandboxPickerItem,
+} from "@t3tools/client-runtime/state/cloudSandbox";
 import { draftSandboxTargetAtom } from "~/state/cloudSandboxChats";
 import { sandboxProfilesList } from "~/state/cloudSandboxProfiles";
 import { useEnvironmentQuery } from "~/state/query";
@@ -158,6 +174,9 @@ interface RunContextSelectorProps {
   onUsePreviousWorktree: () => void;
   addTargets: readonly AddProjectTarget[];
   onAddToMachine: (environmentId: EnvironmentId) => void;
+  sandboxItems: ReadonlyArray<SandboxPickerItem>;
+  sandboxTarget: CloudSandboxChatTarget | null;
+  onSandboxTargetChange: (target: CloudSandboxChatTarget | null) => void;
 }
 
 const RunContextSelector = memo(function RunContextSelector({
@@ -181,7 +200,13 @@ const RunContextSelector = memo(function RunContextSelector({
   onUsePreviousWorktree,
   addTargets,
   onAddToMachine,
+  sandboxItems,
+  sandboxTarget,
+  onSandboxTargetChange,
 }: RunContextSelectorProps) {
+  const selectedSandbox = sandboxItems.find(
+    (item) => item.value === sandboxPickerValue(sandboxTarget),
+  );
   const composerFloatingLayerProps = useComposerMenuProps();
   const activeEnvironment =
     availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null;
@@ -191,13 +216,15 @@ const RunContextSelector = memo(function RunContextSelector({
       : activeWorktreePath
         ? FolderGitIcon
         : FolderIcon;
-  const workspaceLabel = forceNewWorktree
-    ? resolveEnvModeLabel("worktree")
-    : envModeLocked
-      ? resolveLockedWorkspaceLabel(activeWorktreePath, effectiveEnvMode)
-      : effectiveEnvMode === "worktree"
-        ? resolveEnvModeLabel("worktree")
-        : resolveCurrentWorkspaceLabel(activeWorktreePath);
+  const workspaceLabel = selectedSandbox
+    ? selectedSandbox.label
+    : forceNewWorktree
+      ? resolveEnvModeLabel("worktree")
+      : envModeLocked
+        ? resolveLockedWorkspaceLabel(activeWorktreePath, effectiveEnvMode)
+        : effectiveEnvMode === "worktree"
+          ? resolveEnvModeLabel("worktree")
+          : resolveCurrentWorkspaceLabel(activeWorktreePath);
   const isPanel = displayMode === "panel";
   const isLocked = envLocked || (envModeLocked && (!isPanel || !showEnvironmentPicker));
   const workspacePath =
@@ -392,8 +419,9 @@ const RunContextSelector = memo(function RunContextSelector({
         <MenuGroup>
           <MenuGroupLabel>Workspace</MenuGroupLabel>
           <MenuRadioGroup
-            value={effectiveEnvMode}
+            value={selectedSandbox === undefined ? effectiveEnvMode : ""}
             onValueChange={(value) => {
+              onSandboxTargetChange(null);
               if (value === "previous-worktree") {
                 onUsePreviousWorktree();
                 return;
@@ -424,6 +452,27 @@ const RunContextSelector = memo(function RunContextSelector({
             ) : null}
           </MenuRadioGroup>
         </MenuGroup>
+        {sandboxItems.length > 0 ? (
+          <MenuGroup>
+            <MenuGroupLabel>Sandbox</MenuGroupLabel>
+            <MenuRadioGroup
+              value={selectedSandbox?.value ?? ""}
+              onValueChange={(value) => {
+                const sandbox = sandboxItems.find((item) => item.value === value);
+                if (sandbox !== undefined) onSandboxTargetChange(sandbox.target);
+              }}
+            >
+              {sandboxItems.map((item) => (
+                <MenuRadioItem key={item.value} value={item.value} closeOnClick>
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <CloudIcon className="size-3" />
+                    <span className="min-w-0 truncate">{item.label}</span>
+                  </span>
+                </MenuRadioItem>
+              ))}
+            </MenuRadioGroup>
+          </MenuGroup>
+        ) : null}
       </MenuPopup>
     </Menu>
   );
@@ -731,6 +780,9 @@ export const BranchToolbar = memo(function BranchToolbar({
             onUsePreviousWorktree={onUsePreviousWorktree}
             addTargets={addTargets}
             onAddToMachine={onAddToMachine}
+            sandboxItems={sandboxItems}
+            sandboxTarget={sandboxTarget}
+            onSandboxTargetChange={setSandboxTarget}
           />
         ) : null}
         {panelSection !== "workspace" ? (
@@ -781,6 +833,9 @@ export const BranchToolbar = memo(function BranchToolbar({
             onUsePreviousWorktree={onUsePreviousWorktree}
             addTargets={addTargets}
             onAddToMachine={onAddToMachine}
+            sandboxItems={sandboxItems}
+            sandboxTarget={sandboxTarget}
+            onSandboxTargetChange={setSandboxTarget}
           />
         </div>
       ) : null}
