@@ -1,4 +1,5 @@
 import {
+  worktreeSetupSnapshotKind,
   worktreeSetupStageLabel,
   type WorktreeSetupSnapshot,
   type WorktreeSetupStage,
@@ -110,6 +111,21 @@ function ShimmerOverlay({ children }: { children: ReactNode }) {
 }
 
 function headerLabel(snapshot: WorktreeSetupSnapshot): string {
+  if (worktreeSetupSnapshotKind(snapshot) === "sandbox") {
+    const failed = snapshot.stages.find((stage) => stage.status === "failed");
+    switch (snapshot.phase) {
+      case "running":
+        return "Setting up sandbox…";
+      case "done":
+        return failed !== undefined
+          ? `Sandbox ready, ${worktreeSetupStageLabel(failed.id).toLowerCase()} failed`
+          : "Sandbox ready";
+      case "failed":
+        return "Sandbox setup failed";
+      case "cancelled":
+        return "Sandbox setup cancelled";
+    }
+  }
   switch (snapshot.phase) {
     case "running":
       return "Setting up worktree…";
@@ -268,7 +284,9 @@ function SetupDetails({ snapshot }: { snapshot: WorktreeSetupSnapshot }) {
       ) : null}
       {snapshot.worktreePath ? (
         <>
-          <dt className="text-foreground/80">Path</dt>
+          <dt className="text-foreground/80">
+            {worktreeSetupSnapshotKind(snapshot) === "sandbox" ? "Sandbox path" : "Path"}
+          </dt>
           <dd className="min-w-0 font-mono">
             <MiddleTruncate value={snapshot.worktreePath} className="flex" />
           </dd>
@@ -321,6 +339,7 @@ export function WorktreeSetupCard({
   embedded?: boolean;
 }) {
   const running = snapshot.phase === "running";
+  const sandbox = worktreeSetupSnapshotKind(snapshot) === "sandbox";
   const [detailsOpen, setDetailsOpen] = useState(false);
   const setupStage = snapshot.stages.find((stage) => stage.id === "setup-script");
   const showTerminal = onOpenTerminal && setupStage && setupStage.status !== "pending";
@@ -375,7 +394,7 @@ export function WorktreeSetupCard({
             Open terminal
           </Button>
         ) : null}
-        {onWorkLocally ? (
+        {onWorkLocally && !sandbox ? (
           <Button type="button" size="xs" variant="ghost-muted" onClick={onWorkLocally}>
             <LaptopIcon aria-hidden />
             Work locally

@@ -19,10 +19,12 @@ import {
   SandboxProfileId,
   ThreadId,
   ChatAttachmentId,
+  type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
 import { bridgeLinkSecretName } from "@t3tools/sandbox-bridge/link";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -34,6 +36,7 @@ import * as ServerConfig from "../config.ts";
 import * as Threads from "../orchestration-v2/ThreadManagementService.ts";
 import * as Sqlite from "../persistence/Sqlite.ts";
 import * as Projects from "../project/ProjectService.ts";
+import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as DocumentText from "../provider/DocumentText.ts";
 import * as Settings from "../serverSettings.ts";
 import * as ProjectTransfer from "../workspace/CloudSandboxProjectTransfer.ts";
@@ -45,7 +48,15 @@ import * as SandboxChats from "./SandboxChats.ts";
 const projectId = ProjectId.make("project-1");
 const controller = EnvironmentId.make("controller");
 
-const harness = () => {
+const harness = ({
+  pauseProvisionOn,
+}: {
+  /** Park the launch inside provisioning; `entered` fires at the gate, `release` opens it. */
+  readonly pauseProvisionOn?: {
+    readonly entered: Deferred.Deferred<void>;
+    readonly release: Deferred.Deferred<void>;
+  };
+} = {}) => {
   const resources = new Map<string, ManagedCloudSandboxResource>();
   const provisions: Array<ManagedCloudSandboxProvisionInput> = [];
   const resumes: Array<string> = [];
@@ -163,7 +174,11 @@ const harness = () => {
               : Effect.succeed(found);
           },
           provision: (input) =>
-            Effect.sync(() => {
+            Effect.gen(function* () {
+              if (pauseProvisionOn !== undefined) {
+                yield* Deferred.succeed(pauseProvisionOn.entered, undefined);
+                yield* Deferred.await(pauseProvisionOn.release);
+              }
               provisions.push(input);
               resources.set(input.operationId, {
                 resourceId: input.operationId,
@@ -211,6 +226,7 @@ const harness = () => {
       }),
     ),
     Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+    Layer.provideMerge(WorktreeSetupTracker.layer),
   );
 
   const startChat = (
@@ -304,6 +320,103 @@ it.effect(
     }).pipe(Effect.provide(h.layer), registrar, Effect.scoped);
   },
 );
+
+it.effect(
+  "reports provisioning stages on the setup tracker while the first message is held",
+  () => {
+    // Park the launch inside provisioning so the card's mid-flight snapshot is observable.
+    const gate = {
+      entered: Deferred.makeUnsafe<void>(),
+      release: Deferred.makeUnsafe<void>(),
+    };
+    const h = harness({ pauseProvisionOn: gate });
+    const threadId = ThreadId.make("thread-tracker");
+    return Effect.gen(function* () {
+      const tracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
+      const chats = yield* SandboxChats.SandboxChats;
+      const settled = yield* Deferred.make<WorktreeSetupSnapshot>();
+      // The stream slides to the newest snapshot, and the terminal one is retained, so
+      // awaiting a non-running snapshot settles even if every intermediate one is dropped.
+      const collector = yield* tracker.stream(threadId).pipe(
+        Stream.runForEach((snapshot) =>
+          snapshot !== null && snapshot.phase !== "running"
+            ? Deferred.succeed(settled, snapshot)
+            : Effect.void,
+        ),
+        Effect.forkScoped,
+      );
+
+      yield* chats.startChat({
+        threadId,
+        projectId,
+        target: { _tag: "new" },
+        message: {
+          messageId: MessageId.make(`message-${threadId}`),
+          text: "Fix the build",
+          title: "Fix the build",
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+      });
+      yield* Deferred.await(gate.entered);
+
+      const midFlight = yield* tracker.get(threadId);
+      expect(midFlight?.phase).toBe("running");
+      expect(midFlight?.stages.map((stage) => [stage.id, stage.status])).toEqual([
+        ["provision", "running"],
+        ["copy", "pending"],
+        ["register", "pending"],
+        ["start", "pending"],
+      ]);
+
+      yield* Deferred.succeed(gate.release, undefined);
+      const finalSnapshot = yield* Deferred.await(settled);
+      yield* Fiber.interrupt(collector).pipe(Effect.ignore);
+
+      expect(finalSnapshot.phase).toBe("done");
+      expect(finalSnapshot.stages.map((stage) => [stage.id, stage.status])).toEqual([
+        ["provision", "done"],
+        ["copy", "done"],
+        ["register", "done"],
+        ["start", "done"],
+      ]);
+      // The sandbox repo root shows in the card's details.
+      expect(finalSnapshot.worktreePath).toBe("/sandbox/repo");
+    }).pipe(Effect.provide(h.layer), registrar, Effect.scoped);
+  },
+);
+
+it.effect("cancelling setup settles the card and fails the held first message retryable", () => {
+  const gate = {
+    entered: Deferred.makeUnsafe<void>(),
+    release: Deferred.makeUnsafe<void>(),
+  };
+  const h = harness({ pauseProvisionOn: gate });
+  const threadId = ThreadId.make("thread-tracker-cancel");
+  return Effect.gen(function* () {
+    const tracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
+    const chats = yield* SandboxChats.SandboxChats;
+    yield* chats.startChat({
+      threadId,
+      projectId,
+      target: { _tag: "new" },
+      message: {
+        messageId: MessageId.make(`message-${threadId}`),
+        text: "Fix the build",
+        title: "Fix the build",
+      },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+    });
+    yield* Deferred.await(gate.entered);
+
+    expect(yield* tracker.cancel(threadId)).toBe(true);
+    expect((yield* tracker.get(threadId))?.phase).toBe("cancelled");
+    // The held first message must leave `preparing` so the composer unblocks.
+    const fail = h.commands.filter((command) => command.type === "prepared-run.fail").at(-1);
+    expect(fail).toMatchObject({ threadId, failure: { retryable: true } });
+  }).pipe(Effect.provide(h.layer), registrar, Effect.scoped);
+});
 
 it.effect(
   "claims a web client's pending upload so the sandboxed turn reads the stored file",

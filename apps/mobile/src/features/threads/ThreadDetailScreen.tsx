@@ -412,6 +412,8 @@ function ThreadDetailBody(
     >;
   },
 ) {
+  const preparingSandbox =
+    props.selectedThread.modelSelection.instanceId === SANDBOX_BRIDGE_INSTANCE_ID;
   const usesNativeWorkspaceColumns = useNativeWorkspaceColumnsSupported();
   useResumeSandboxChat(
     props.environmentId,
@@ -1493,6 +1495,7 @@ function ThreadDetailBody(
                     props.creationState.preparingWorktree &&
                     !props.worktreeSetup
                   }
+                  preparingSandbox={preparingSandbox}
                   queuedMessages={props.queuedMessages}
                   dispatchingMessageId={props.dispatchingMessageId}
                   // A native subagent has no composer to edit a pending message in;

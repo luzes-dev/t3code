@@ -1,6 +1,7 @@
 import { Button } from "../../components/ui/Button";
 import {
   WORKTREE_SETUP_STAGE_ORDER,
+  worktreeSetupSnapshotKind,
   worktreeSetupStageLabel,
   type WorktreeSetupSnapshot,
   type WorktreeSetupStage,
@@ -50,20 +51,29 @@ export function WorktreeSetupCard(props: WorktreeSetupCardProps) {
   const now = useVisibleSecondClock(running || working);
   const failed =
     snapshot.phase === "failed" || snapshot.stages.some((stage) => stage.status === "failed");
+  const sandbox = worktreeSetupSnapshotKind(snapshot) === "sandbox";
   const label =
     handedOff && working
       ? `Working for ${elapsed(turnStartedAt, null, now) ?? "0s"}`
       : running
         ? handedOff
           ? "Setup continues…"
-          : "Setting up worktree…"
+          : sandbox
+            ? "Setting up sandbox…"
+            : "Setting up worktree…"
         : snapshot.phase === "cancelled"
-          ? "Worktree setup cancelled"
+          ? sandbox
+            ? "Sandbox setup cancelled"
+            : "Worktree setup cancelled"
           : snapshot.phase === "failed"
-            ? "Worktree setup failed"
+            ? sandbox
+              ? "Sandbox setup failed"
+              : "Worktree setup failed"
             : failed
               ? "Setup script failed"
-              : "Worktree ready";
+              : sandbox
+                ? "Sandbox ready"
+                : "Worktree ready";
 
   return (
     <View accessibilityLabel="Worktree setup" className="py-1">
@@ -162,11 +172,11 @@ const PREPARING_STAGES: ReadonlyArray<WorktreeSetupStage> = WORKTREE_SETUP_STAGE
   tail: [],
 }));
 
-export function WorktreePreparingHeader() {
+export function WorktreePreparingHeader({ sandbox = false }: { sandbox?: boolean } = {}) {
   return (
     <View className="py-1">
       <View className="min-h-11 flex-row items-center border-b border-border px-1">
-        <HeaderLabel label="Setting up worktree…" active />
+        <HeaderLabel label={sandbox ? "Setting up sandbox…" : "Setting up worktree…"} active />
       </View>
       <View className="pt-1 pb-2">
         {PREPARING_STAGES.map((stage) => (

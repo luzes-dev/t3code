@@ -53,6 +53,7 @@ interface ComposerPrimaryActionsProps {
   sendDisabledReason: string | null;
   isEnvironmentUnavailable: boolean;
   isPreparingWorktree: boolean;
+  isSandboxThread?: boolean | undefined;
   hasSendableContent: boolean;
   canResume?: boolean;
   preserveComposerFocusOnPointerDown?: boolean;
@@ -235,6 +236,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   sendDisabledReason,
   isEnvironmentUnavailable,
   isPreparingWorktree,
+  isSandboxThread = false,
   hasSendableContent,
   canResume = false,
   preserveComposerFocusOnPointerDown = false,
@@ -384,7 +386,9 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     ? "Environment disconnected"
     : (sendDisabledReason ??
       (isPreparingWorktree
-        ? "Preparing worktree"
+        ? isSandboxThread
+          ? "Preparing sandbox"
+          : "Preparing worktree"
         : isSendBusy
           ? isEditingQueuedMessage
             ? "Updating queued message"

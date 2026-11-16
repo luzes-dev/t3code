@@ -13,6 +13,11 @@ export const WorktreeSetupStageId = Schema.Literals([
   "submodules",
   "setup-script",
   "agent",
+  // Cloud sandbox chats publish these instead of the worktree stages.
+  "provision",
+  "copy",
+  "register",
+  "start",
 ]);
 export type WorktreeSetupStageId = typeof WorktreeSetupStageId.Type;
 
@@ -85,7 +90,27 @@ export const WORKTREE_SETUP_STAGE_ORDER: ReadonlyArray<WorktreeSetupStageId> = [
   "submodules",
   "setup-script",
   "agent",
+  // Sandbox stages last, so begin()'s ORDER filter keeps each stage set's relative order.
+  "provision",
+  "copy",
+  "register",
+  "start",
 ];
+
+export const WORKTREE_SETUP_SANDBOX_STAGE_ORDER: ReadonlyArray<WorktreeSetupStageId> = [
+  "provision",
+  "copy",
+  "register",
+  "start",
+];
+
+/** A snapshot's stage ids name its kind: the sandbox stages only ever appear together. */
+export function worktreeSetupSnapshotKind(
+  snapshot: Pick<WorktreeSetupSnapshot, "stages">,
+): "worktree" | "sandbox" {
+  const sandbox = new Set(WORKTREE_SETUP_SANDBOX_STAGE_ORDER);
+  return snapshot.stages.some((stage) => sandbox.has(stage.id)) ? "sandbox" : "worktree";
+}
 
 export function worktreeSetupStageLabel(id: WorktreeSetupStageId): string {
   switch (id) {
@@ -98,6 +123,14 @@ export function worktreeSetupStageLabel(id: WorktreeSetupStageId): string {
     case "setup-script":
       return "Run setup script";
     case "agent":
+      return "Start agent";
+    case "provision":
+      return "Provision sandbox";
+    case "copy":
+      return "Copy project";
+    case "register":
+      return "Register project";
+    case "start":
       return "Start agent";
   }
 }

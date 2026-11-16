@@ -19,5 +19,8 @@ export function resolveVisibleWorktreeSetup(input: {
 }
 
 export function worktreeSetupAgentStarted(snapshot: WorktreeSetupSnapshot): boolean {
-  return snapshot.stages.some((stage) => stage.id === "agent" && stage.status === "done");
+  // Sandbox snapshots hand off on their own `start` stage instead of `agent`.
+  return snapshot.stages.some(
+    (stage) => (stage.id === "agent" || stage.id === "start") && stage.status === "done",
+  );
 }

@@ -15,6 +15,7 @@ import {
   type ProviderInstanceConfig,
   ProviderDriverKind,
   ProviderInstanceId,
+  WORKTREE_SETUP_SANDBOX_STAGE_ORDER,
   SANDBOX_BRIDGE_INSTANCE_ID,
   SANDBOX_BRIDGE_MODEL,
   ThreadId,
@@ -28,6 +29,7 @@ import {
   SandboxBridgeLinkJson,
 } from "@t3tools/sandbox-bridge/link";
 import { resolveSelfInvocation, selfInvocationArgs } from "@t3tools/shared/nodeRuntime";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -50,6 +52,7 @@ import * as ThreadMessageIntake from "../orchestration-v2/ThreadMessageIntake.ts
 import * as Threads from "../orchestration-v2/ThreadManagementService.ts";
 import * as Projects from "../project/ProjectService.ts";
 import * as DocumentText from "../provider/DocumentText.ts";
+import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectTransfer from "../workspace/CloudSandboxProjectTransfer.ts";
 import * as Manager from "./CloudSandboxManager.ts";
@@ -134,6 +137,7 @@ const make = Effect.gen(function* () {
   const profiles = yield* Profiles.CloudSandboxProfiles;
   const transfer = yield* ProjectTransfer.CloudSandboxProjectTransfer;
   const registerProject = yield* SandboxProjectRegistrar;
+  const setupTracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
   const attachmentServices = yield* Effect.context<
     FileSystem.FileSystem | Path.Path | ServerConfig.ServerConfig
   >();
@@ -257,8 +261,14 @@ const make = Effect.gen(function* () {
     input: { readonly projectId: ProjectId; readonly title: string },
   ) {
     const existing = yield* manager.get(row.resource_id).pipe(Effect.option);
-    if (Option.isSome(existing) && existing.value.phase !== "failed")
-      return yield* manager.connect(row.resource_id, { resume: true });
+    if (Option.isSome(existing) && existing.value.phase !== "failed") {
+      const reusing =
+        existing.value.phase === "stopped" ? "Restarting this sandbox" : "Already running";
+      yield* setupTracker.stageStatus(row.thread_id, "provision", "running", reusing);
+      const resumed = yield* manager.connect(row.resource_id, { resume: true });
+      yield* setupTracker.stageStatus(row.thread_id, "provision", "done", reusing);
+      return resumed;
+    }
     if (row.target === "current")
       return yield* new CloudSandboxChatError({ message: "That sandbox no longer exists." });
     const listed = yield* profiles.list.pipe(
@@ -269,7 +279,8 @@ const make = Effect.gen(function* () {
       return yield* new CloudSandboxChatError({
         message: "No sandbox profile is configured. Add one in Settings → Environments.",
       });
-    return yield* manager.provision({
+    yield* setupTracker.stageStatus(row.thread_id, "provision", "running");
+    const provisioned = yield* manager.provision({
       operationId: row.resource_id,
       profile: profile.profileId,
       sandbox: {
@@ -285,6 +296,8 @@ const make = Effect.gen(function* () {
         retention: row.target === "new" ? "delete-on-completion" : "stop-and-retain",
       },
     });
+    yield* setupTracker.stageStatus(row.thread_id, "provision", "done");
+    return provisioned;
   });
 
   const writeLink = Effect.fn("SandboxChats.writeLink")(function* (
@@ -337,9 +350,17 @@ const make = Effect.gen(function* () {
         .pipe(Effect.mapError(chatError("Could not read the project.")));
       if (Option.isNone(project))
         return yield* new CloudSandboxChatError({ message: "The project no longer exists." });
+      yield* setupTracker.stageStatus(threadId, "copy", "running");
       const workspaceRoot = yield* transfer
         .transfer({ resourceId: row.resource_id, cwd: project.value.workspaceRoot })
         .pipe(Effect.mapError(chatError("Could not copy the project to the sandbox.")));
+      // The sandbox repo root shows in the setup card's details.
+      yield* setupTracker.update(threadId, (snapshot) => ({
+        ...snapshot,
+        worktreePath: workspaceRoot,
+      }));
+      yield* setupTracker.stageStatus(threadId, "copy", "done");
+      yield* setupTracker.stageStatus(threadId, "register", "running");
       const created = yield* registerProject(
         {
           instanceId: route.connection.resourceId,
@@ -361,12 +382,19 @@ const make = Effect.gen(function* () {
         Effect.provide(FetchHttpClient.layer),
         Effect.mapError(chatError("Could not register the project in the sandbox.")),
       );
+      yield* setupTracker.stageStatus(threadId, "register", "done");
       sandboxProjectId = created.id;
       yield* sql`UPDATE cloud_sandbox_chats SET sandbox_project_id = ${sandboxProjectId}
         WHERE thread_id = ${threadId}`.pipe(
         Effect.mapError(chatError("Could not save this chat's sandbox project.")),
       );
+    } else {
+      // Another chat on the same follower registered this project already.
+      const reused = "Project already in sandbox";
+      yield* setupTracker.stageStatus(threadId, "copy", "skipped", reused);
+      yield* setupTracker.stageStatus(threadId, "register", "skipped", reused);
     }
+    yield* setupTracker.stageStatus(threadId, "start", "running");
     yield* writeLink(threadId, route, sandboxProjectId).pipe(
       Effect.mapError(chatError("Could not save this chat's sandbox link.")),
     );
@@ -380,32 +408,84 @@ const make = Effect.gen(function* () {
 
   /** Readies the follower, then lets the held first message go, or fails it with the reason. */
   const launch = Effect.fn("SandboxChats.launch")(function* (threadId: ThreadId) {
-    const prepared = yield* prepare(threadId).pipe(Effect.result);
-    for (const run of yield* preparingRuns(threadId)) {
-      yield* threads
-        .dispatch(
-          prepared._tag === "Success"
-            ? {
-                type: "prepared-run.release",
-                commandId: yield* commandId("release"),
-                threadId,
-                runId: run.id,
-              }
-            : {
-                type: "prepared-run.fail",
-                commandId: yield* commandId("fail"),
-                threadId,
-                runId: run.id,
-                failure: {
-                  class: "provider_error",
-                  message: prepared.failure.message,
-                  code: null,
-                  retryable: true,
+    // Drives the setup card the chat UI shows while the follower provisions.
+    yield* setupTracker.begin({
+      threadId,
+      branch: null,
+      baseRef: null,
+      stages: WORKTREE_SETUP_SANDBOX_STAGE_ORDER,
+      fiber: yield* Effect.fiber,
+    });
+    yield* Effect.gen(function* () {
+      const prepared = yield* prepare(threadId).pipe(Effect.result);
+      yield* setupTracker.markUncancellable(threadId);
+      for (const run of yield* preparingRuns(threadId)) {
+        yield* threads
+          .dispatch(
+            prepared._tag === "Success"
+              ? {
+                  type: "prepared-run.release",
+                  commandId: yield* commandId("release"),
+                  threadId,
+                  runId: run.id,
+                }
+              : {
+                  type: "prepared-run.fail",
+                  commandId: yield* commandId("fail"),
+                  threadId,
+                  runId: run.id,
+                  failure: {
+                    class: "provider_error",
+                    message: prepared.failure.message,
+                    code: null,
+                    retryable: true,
+                  },
                 },
-              },
-        )
-        .pipe(Effect.ignore);
-    }
+          )
+          .pipe(Effect.ignore);
+      }
+      if (prepared._tag === "Success") {
+        yield* setupTracker.stageStatus(threadId, "start", "done");
+        yield* setupTracker.finish(threadId, "done");
+      } else {
+        yield* setupTracker.finish(threadId, "failed", prepared.failure.message);
+      }
+    }).pipe(
+      Effect.onError((cause) =>
+        Effect.gen(function* () {
+          const cancelled = Cause.hasInterruptsOnly(cause);
+          yield* setupTracker.finish(
+            threadId,
+            cancelled ? "cancelled" : "failed",
+            cancelled ? null : "The sandbox could not start.",
+          );
+          if (!cancelled) return;
+          // Cancelled setup leaves the first message held `preparing`: fail it so the
+          // composer unblocks, keeping it retryable so the chat can still start later.
+          yield* Effect.forEach(
+            yield* preparingRuns(threadId),
+            (run) =>
+              Effect.gen(function* () {
+                yield* threads
+                  .dispatch({
+                    type: "prepared-run.fail",
+                    commandId: yield* commandId("fail"),
+                    threadId,
+                    runId: run.id,
+                    failure: {
+                      class: "provider_error",
+                      message: "Sandbox setup was cancelled.",
+                      code: null,
+                      retryable: true,
+                    },
+                  })
+                  .pipe(Effect.ignore);
+              }),
+            { discard: true },
+          );
+        }),
+      ),
+    );
   });
 
   const storedAttachments = Effect.fn("SandboxChats.storedAttachments")(function* (

@@ -190,6 +190,7 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
   compact: boolean;
   canOperateThread: boolean;
   isPreparingWorktree: boolean;
+  isSandboxThread?: boolean;
   pendingAction: {
     questionIndex: number;
     isLastQuestion: boolean;
@@ -237,6 +238,7 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
         sendDisabledReason={props.sendDisabledReason}
         isEnvironmentUnavailable={props.isEnvironmentUnavailable}
         isPreparingWorktree={props.isPreparingWorktree}
+        isSandboxThread={props.isSandboxThread}
         hasSendableContent={props.hasSendableContent}
         canResume={props.canResume}
         preserveComposerFocusOnPointerDown={props.preserveComposerFocusOnPointerDown ?? false}

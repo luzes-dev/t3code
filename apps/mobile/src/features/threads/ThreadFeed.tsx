@@ -343,6 +343,7 @@ export interface ThreadFeedProps {
   readonly worktreeSetup?: WorktreeSetupCardProps | null;
   readonly setupWorkingStartedAt?: string | null;
   readonly preparingWorktree?: boolean;
+  readonly preparingSandbox?: boolean;
   readonly queuedMessages: ReadonlyArray<QueuedThreadMessage>;
   readonly dispatchingMessageId: MessageId | null;
   readonly onEditPendingMessage: ((message: QueuedThreadMessage) => void) | null;
@@ -3968,7 +3969,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
           ) : props.setupWorkingStartedAt && info.index === setupAnchorIndex ? (
             <WorktreeWorkingHeader startedAt={props.setupWorkingStartedAt} />
           ) : props.preparingWorktree && info.index === setupAnchorIndex ? (
-            <WorktreePreparingHeader />
+            <WorktreePreparingHeader sandbox={props.preparingSandbox === true} />
           ) : null}
         </ThreadMediaVisibility>
       </MessageImageGalleryScope>
@@ -4069,7 +4070,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
                 {setupAnchorIndex < 0 && props.worktreeSetup ? (
                   <WorktreeSetupCard key={props.threadId} {...props.worktreeSetup} />
                 ) : setupAnchorIndex < 0 && props.preparingWorktree ? (
-                  <WorktreePreparingHeader />
+                  <WorktreePreparingHeader sandbox={props.preparingSandbox === true} />
                 ) : null}
                 {props.historyControls ? (
                   <ThreadFeedLoadEarlierControl {...props.historyControls} />

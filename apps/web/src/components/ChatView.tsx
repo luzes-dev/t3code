@@ -838,6 +838,8 @@ export default function ChatView(props: ChatViewProps) {
       )
     : undefined;
   const isServerThread = serverThread !== null;
+  // Sandbox chats run on the shared bridge instance; preparation copy names the sandbox.
+  const isSandboxChat = serverThread?.modelSelection.instanceId === SANDBOX_BRIDGE_INSTANCE_ID;
   const activeThread = isServerThread ? serverThread : localDraftThread;
   useResumeSandboxChat(
     environmentId,
@@ -3487,6 +3489,7 @@ export default function ChatView(props: ChatViewProps) {
                     : {})}
                   {...(onOpenWorktreeSetupTerminal ? { onOpenWorktreeSetupTerminal } : {})}
                   isPreparingWorktree={isPreparingWorktree}
+                  isSandboxThread={isSandboxChat}
                   footer={timelineFooter}
                   listRef={legendListRef}
                   runs={serverProjection?.runs ?? []}
@@ -3698,10 +3701,13 @@ export default function ChatView(props: ChatViewProps) {
                                           : threadDetailLoading
                                             ? "Messages loading"
                                             : worktreeSetupBlocksSend
-                                              ? "Preparing worktree"
+                                              ? isSandboxChat
+                                                ? "Preparing sandbox"
+                                                : "Preparing worktree"
                                               : projectCloneSendBlockReason
                                 }
                                 isPreparingWorktree={isPreparingWorktree && !sendQueuesBehindSetup}
+                                isSandboxThread={isSandboxChat}
                                 bannerItems={
                                   isDraftHeroState || composerBannerItems.length === 0
                                     ? EMPTY_COMPOSER_BANNER_ITEMS

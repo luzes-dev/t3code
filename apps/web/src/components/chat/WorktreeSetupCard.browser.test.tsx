@@ -76,3 +76,66 @@ it("stops a stage interrupted by the setup ending at the setup's end", async () 
   });
   expect(section.element().textContent).toContain("Check out files2s");
 });
+
+it("names sandbox snapshots after the sandbox", async () => {
+  using _timers = fakeTimers();
+  vi.setSystemTime(NOW);
+  await using screen = await render(
+    card(
+      snapshot({
+        branch: null,
+        baseRef: null,
+        worktreePath: null,
+        setupScript: null,
+        stages: [
+          {
+            id: "provision",
+            status: "running",
+            startedAt: "2026-10-26T12:00:00.000Z",
+            endedAt: null,
+            percent: null,
+            detail: null,
+            tail: [],
+          },
+          {
+            id: "copy",
+            status: "pending",
+            startedAt: null,
+            endedAt: null,
+            percent: null,
+            detail: null,
+            tail: [],
+          },
+        ],
+      }),
+    ),
+  );
+  const section = screen.getByRole("region", { name: "Worktree setup" });
+
+  expect(section.element().textContent).toContain("Provision sandbox");
+  expect(section.element().textContent).toContain("Copy project");
+  expect(section.element().textContent).not.toContain("worktree");
+  // A cancelled sandbox setup gets its own header copy.
+  await using cancelled = await render(
+    card(
+      snapshot({
+        phase: "cancelled",
+        endedAt: "2026-10-26T12:00:05.000Z",
+        stages: [
+          {
+            id: "provision",
+            status: "skipped",
+            startedAt: null,
+            endedAt: null,
+            percent: null,
+            detail: null,
+            tail: [],
+          },
+        ],
+      }),
+    ),
+  );
+  expect(cancelled.getByRole("region", { name: "Worktree setup" }).element().textContent).toContain(
+    "Sandbox setup cancelled",
+  );
+});

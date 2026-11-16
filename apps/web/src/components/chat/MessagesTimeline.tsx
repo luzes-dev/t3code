@@ -243,6 +243,8 @@ interface MessagesTimelineProps {
   onWorktreeSetupWorkLocally?: () => void;
   onOpenWorktreeSetupTerminal?: (terminalId: string) => void;
   isPreparingWorktree?: boolean;
+  /** The run runs on a cloud sandbox, so preparation copy names the sandbox. */
+  isSandboxThread?: boolean;
   isCompacting?: boolean;
   awaitingUser?: "approval" | "input" | null;
   /** Which request is waiting, so a second one of the same kind is announced too. */
@@ -362,6 +364,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   onWorktreeSetupWorkLocally,
   onOpenWorktreeSetupTerminal,
   isPreparingWorktree = false,
+  isSandboxThread = false,
   isCompacting = false,
   awaitingUser = null,
   awaitingRequestId = null,
@@ -1177,6 +1180,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     backgroundWorktreeSetup,
     awaitingUser: awaitingUser !== null,
     isPreparingWorktree,
+    isPreparingSandbox: isSandboxThread && isPreparingWorktree,
     providerStartingLabel,
     latestRunId: latestRun?.runId ?? null,
     liveAnswerPreview:

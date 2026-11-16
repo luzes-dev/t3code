@@ -112,6 +112,8 @@ export interface TimelineRowActivityState {
   isRevertingCheckpoint: boolean;
   awaitingUser: boolean;
   isPreparingWorktree: boolean;
+  /** No setup snapshot yet: name the run target correctly in the fallback working row. */
+  isPreparingSandbox: boolean;
   providerStartingLabel: string | null;
   latestRunId: RunId | null;
   backgroundWorktreeSetup: WorktreeSetupSnapshot | null;
