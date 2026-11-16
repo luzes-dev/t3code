@@ -25,6 +25,7 @@ import {
   type RunTarget,
   offersCloudSandboxControl,
   parseSandboxProfileLimits,
+  parseSandboxSetup,
   selectableEnvironmentIds,
 } from "./cloudSandbox.ts";
 
@@ -226,6 +227,21 @@ describe("parseSandboxProfileLimits", () => {
       expect(parseSandboxProfileLimits({ ...valid, maxConcurrentSandboxes })).toEqual(
         Result.fail("Concurrent sandboxes must be a whole number from 1 to 100."),
       );
+    },
+  );
+});
+
+describe("parseSandboxSetup", () => {
+  it("keeps home paths one per line and reads a blank script as none", () => {
+    expect(parseSandboxSetup({ files: " .claude\n\n.codex/AGENTS.md \n", script: "  " })).toEqual(
+      Result.succeed({ files: [".claude", ".codex/AGENTS.md"], script: null }),
+    );
+  });
+
+  it.each(["/etc/passwd", "~/.ssh", "../outside", ".config/../../x", "C:\\Users"])(
+    "rejects %s, which leaves the home folder",
+    (files) => {
+      expect(Result.isFailure(parseSandboxSetup({ files, script: "" }))).toBe(true);
     },
   );
 });

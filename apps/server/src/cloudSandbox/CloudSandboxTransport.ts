@@ -14,6 +14,7 @@ import {
   ManagedCloudSandboxContext,
   MANAGED_CLOUD_SOURCE_PORT,
   type CloudSandboxDriverKind,
+  type CloudSandboxSetup,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as NetService from "@t3tools/shared/Net";
@@ -46,6 +47,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as ServerConfig from "../config.ts";
 import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import { CloudSandboxManagerError } from "./CloudSandboxStore.ts";
+import { collectSetupFiles, setupProfileScript } from "./CloudSandboxSetupProfile.ts";
 import packageJson from "../../package.json" with { type: "json" };
 
 export const cloudSandboxCliRunner = Effect.gen(function* () {
@@ -79,6 +81,7 @@ export interface CloudSandboxTransportInput {
   readonly expectedEnvironmentId: EnvironmentId | null;
   readonly context: ManagedCloudSandboxContext;
   readonly enableLinkedEnvironments: boolean;
+  readonly setup: CloudSandboxSetup | null;
 }
 export class CloudSandboxTransport extends Context.Service<
   CloudSandboxTransport,
@@ -96,6 +99,8 @@ export class CloudSandboxTransport extends Context.Service<
   }
 >()("t3/cloudSandbox/CloudSandboxTransport") {}
 const isManagerError = Schema.is(CloudSandboxManagerError);
+// Installing CLIs on a fresh VM can take minutes; a marker skips it on later connects.
+const SETUP_PROFILE_TIMEOUT_MS = 15 * 60_000;
 const encodeContext = Schema.encodeEffect(Schema.fromJsonString(ManagedCloudSandboxContext));
 const SSH_HOST_PUBLIC_KEY_PATTERN =
   /^[A-Za-z0-9._-]+(?:@[A-Za-z0-9.-]+)?\s+[A-Za-z0-9+/=]+(?:\s+[^\r\n]+)?$/u;
@@ -267,7 +272,33 @@ export const make = Effect.gen(function* () {
         stdin: cloudSandboxSetupPayload(input, hash, parentHash, context),
         batchMode: "yes",
       });
-      const bootstrap = yield* manager.ensureEnvironment(target, { issuePairingToken: true });
+      const setup = input.setup;
+      const applySetup =
+        setup === null
+          ? Effect.void
+          : Effect.gen(function* () {
+              const files = yield* collectSetupFiles(yield* HostProcess.HomeDirectory, setup.files);
+              const { script } = yield* setupProfileScript(files, setup);
+              yield* runSshCommand(target, {
+                remoteCommandArgs: ["sh", "-s"],
+                stdin: script,
+                batchMode: "yes",
+                timeoutMs: SETUP_PROFILE_TIMEOUT_MS,
+                keepErrorOutputTail: true,
+              });
+            }).pipe(
+              // The sandbox still works without its working set; the next connect tries again.
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Sandbox setup profile did not apply", {
+                  resourceId: input.resourceId,
+                  cause,
+                }),
+              ),
+            );
+      const [bootstrap] = yield* Effect.all(
+        [manager.ensureEnvironment(target, { issuePairingToken: true }), applySetup],
+        { concurrency: "unbounded" },
+      );
       const api = yield* HttpApiClient.make(EnvironmentHttpApi, { baseUrl: bootstrap.httpBaseUrl });
       const [descriptor, runtimeState] = yield* Effect.all(
         [api.metadata.descriptor(), readPersistedServerRuntimeState(config.serverRuntimeStatePath)],

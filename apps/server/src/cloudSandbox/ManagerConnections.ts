@@ -187,7 +187,7 @@ export const makeConnections = (rt: ManagerRuntime, reservations: ManagerReserva
     }
     const sandboxId = yield* requireSandbox(record);
     const grantToken = yield* ensureGrantToken(record.resourceId);
-    const { apiKey } = yield* resolveProfile(record.profileId);
+    const { apiKey, profile } = yield* resolveProfile(record.profileId);
     const connected = yield* transport.connect({
       resourceId: record.resourceId,
       driverKind: record.driverKind,
@@ -206,6 +206,7 @@ export const makeConnections = (rt: ManagerRuntime, reservations: ManagerReserva
         grantToken,
       },
       enableLinkedEnvironments: record.enableLinkedEnvironments,
+      setup: profile.setup ?? null,
     });
     const result: ManagedCloudSandboxRoute = {
       ...connected,

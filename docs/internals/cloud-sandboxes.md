@@ -95,6 +95,20 @@ a live or queued run, a pending request, an in-flight subagent, command, or tool
 item, a waiting link request, or provider background work. Items of a rolled-back
 run and pull request watches do not keep a VM billing.
 
+## Setup profiles
+
+A profile's optional `setup` (home-relative files plus a script) is applied by
+`CloudSandboxTransport.connect` to every sandbox from that profile, on every
+connect, in parallel with the server bootstrap. The controller reads the files
+from its own home and sends one self-checking shell script
+([CloudSandboxSetupProfile.ts](../../apps/server/src/cloudSandbox/CloudSandboxSetupProfile.ts)):
+it returns at once when `~/.t3/setup-profile.sha256` names the same files and
+script, so the steady-state cost is one parallel SSH round trip. A failing script
+leaves the marker unset and only logs, because a sandbox without its working set
+still works and the next connect retries. Saves without `setup` keep the stored
+one, so older clients never clear it. Sign-ins are copied files: no credential hub
+exists to mint per-sandbox keys, so a deleted sandbox revokes nothing.
+
 ## Behavior matrix
 
 | Behavior                                             | Persistent (`user`)                  | Follower (`thread`/`task`)                                                                                                                                                                                                                                                                                                         |

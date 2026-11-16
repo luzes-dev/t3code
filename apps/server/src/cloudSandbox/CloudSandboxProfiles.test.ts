@@ -93,11 +93,15 @@ it.effect("refuses to delete a profile while it owns a sandbox", () =>
   }).pipe(Effect.provide(layer), Effect.scoped),
 );
 
-it.effect("persists the concurrent sandbox limit with the profile", () =>
+it.effect("persists the concurrent limit and setup, and a save without setup keeps it", () =>
   Effect.gen(function* () {
     const profiles = yield* Profiles.CloudSandboxProfiles;
-    yield* profiles.save({ ...input, apiKey: "working-key", maxConcurrentSandboxes: 7 });
+    const setup = { files: [".claude/CLAUDE.md"], script: "npm i -g @openai/codex" };
+    yield* profiles.save({ ...input, apiKey: "working-key", maxConcurrentSandboxes: 7, setup });
     expect((yield* profiles.resolve(profileId)).profile.maxConcurrentSandboxes).toBe(7);
+    // Older clients and the add-environment wizard save without a setup field.
+    yield* profiles.save({ ...input, maxConcurrentSandboxes: 7 });
+    expect((yield* profiles.resolve(profileId)).profile.setup).toEqual(setup);
   }).pipe(Effect.provide(layer), Effect.scoped),
 );
 

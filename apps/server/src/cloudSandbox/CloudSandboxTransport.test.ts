@@ -265,6 +265,7 @@ it.effect("returns an unconsumed peer credential after exchanging the transport 
       expectedEnvironmentId: null,
       allowResume: true,
       enableLinkedEnvironments: true,
+      setup: null,
       context: {
         resourceId: ManagedCloudSandboxResourceId.make("fresh"),
         controllerEnvironmentId: EnvironmentId.make("controller"),
@@ -397,6 +398,7 @@ it.effect("uses the provider-attested host key after a sandbox restart", () =>
       expectedEnvironmentId: null,
       allowResume: true,
       enableLinkedEnvironments: false,
+      setup: null,
       context: {
         resourceId: ManagedCloudSandboxResourceId.make("pinned"),
         controllerEnvironmentId: EnvironmentId.make("controller"),
@@ -487,6 +489,7 @@ it.effect("rejects injected or malformed SSH host keys before writing known_host
           expectedEnvironmentId: null,
           allowResume: true,
           enableLinkedEnvironments: false,
+          setup: null,
           context: {
             resourceId: ManagedCloudSandboxResourceId.make("bad-host-key"),
             controllerEnvironmentId: EnvironmentId.make("controller"),

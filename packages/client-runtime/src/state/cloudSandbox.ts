@@ -1,4 +1,6 @@
 import {
+  CloudSandboxSetupPath,
+  type CloudSandboxSetup,
   type CloudSandboxChatTarget,
   type CloudSandboxProfileStatus,
   type EnvironmentId,
@@ -10,6 +12,7 @@ import {
 import * as Effect from "effect/Effect";
 import type { HttpClient } from "effect/http";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import { AsyncResult, Atom } from "effect/reactivity";
@@ -226,6 +229,29 @@ export function parseSandboxProfileLimits(input: {
     maxConcurrentSandboxes: input.maxConcurrentSandboxes,
     template: template === "" ? null : template,
   });
+}
+
+const isSetupPath = Schema.is(CloudSandboxSetupPath);
+
+/** The setup fields as a form shows them: one home path per line, and the script. */
+export function sandboxSetupFields(setup: CloudSandboxSetup | undefined) {
+  return { files: setup?.files.join("\n") ?? "", script: setup?.script ?? "" };
+}
+
+/** Reads a profile form's setup fields: one home-relative path per line, blank lines ignored. */
+export function parseSandboxSetup(input: {
+  readonly files: string;
+  readonly script: string;
+}): Result.Result<CloudSandboxSetup, string> {
+  const files = input.files
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  const invalid = files.find((file) => !isSetupPath(file));
+  if (invalid !== undefined)
+    return Result.fail(`"${invalid}" must be a path inside your home folder, such as .claude.`);
+  const script = input.script.trim();
+  return Result.succeed({ files, script: script === "" ? null : script });
 }
 
 /** Null when the command succeeded or was interrupted, so the caller can clear the error. */

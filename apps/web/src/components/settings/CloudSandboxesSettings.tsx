@@ -14,6 +14,8 @@ import {
   managedSandboxIssueRecovery,
   offersCloudSandboxControl,
   parseSandboxProfileLimits,
+  parseSandboxSetup,
+  sandboxSetupFields,
   type ManagedCloudSandboxIssueRollup,
 } from "@t3tools/client-runtime/state/cloudSandbox";
 import * as Result from "effect/Result";
@@ -38,6 +40,7 @@ import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { Textarea } from "../ui/textarea";
 import { ITEM_ROW_CLASSNAME, ITEM_ROW_INNER_CLASSNAME } from "./itemRows";
 import { SettingsSection } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
@@ -151,6 +154,8 @@ function SandboxProfileRow({
   const [budget, setBudget] = useState("");
   const [concurrent, setConcurrent] = useState("");
   const [template, setTemplate] = useState("");
+  const [setupFiles, setSetupFiles] = useState("");
+  const [setupScript, setSetupScript] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [pending, setPending] = useState<"save" | "remove" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -160,6 +165,9 @@ function SandboxProfileRow({
     setBudget(profile.monthlyBudgetUsd === null ? "" : String(profile.monthlyBudgetUsd));
     setConcurrent(String(profile.maxConcurrentSandboxes));
     setTemplate(profile.template ?? "");
+    const fields = sandboxSetupFields(profile.setup);
+    setSetupFiles(fields.files);
+    setSetupScript(fields.script);
     setError(null);
     setEditing(true);
   };
@@ -175,6 +183,11 @@ function SandboxProfileRow({
       setError(limits.failure);
       return;
     }
+    const setup = parseSandboxSetup({ files: setupFiles, script: setupScript });
+    if (Result.isFailure(setup)) {
+      setError(setup.failure);
+      return;
+    }
     setPending("save");
     setError(null);
     const result = await saveProfile({
@@ -187,6 +200,7 @@ function SandboxProfileRow({
         autoStopMinutes: profile.autoStopMinutes,
         ...(apiKey.trim() === "" ? {} : { apiKey: apiKey.trim() }),
         ...limits.success,
+        setup: setup.success,
       },
     });
     setPending(null);
@@ -309,6 +323,33 @@ function SandboxProfileRow({
               placeholder="None"
               disabled={pending !== null}
               nativeInput
+              spellCheck={false}
+            />
+          </label>
+          <label className="block space-y-1.5 sm:col-span-3">
+            <span className="block text-xs font-medium text-foreground">Files to copy</span>
+            <Textarea
+              size="sm"
+              value={setupFiles}
+              onChange={(event) => setSetupFiles(event.target.value)}
+              placeholder={".claude/CLAUDE.md\n.claude/skills\n.codex/config.toml"}
+              disabled={pending !== null}
+              spellCheck={false}
+            />
+            <span className="block text-xs text-muted-foreground">
+              One path per line, inside the home folder of the machine this environment runs on:
+              agent instructions, skills, MCP config, and CLI sign-ins. Copied to each sandbox
+              before its first run, and again when they change.
+            </span>
+          </label>
+          <label className="block space-y-1.5 sm:col-span-3">
+            <span className="block text-xs font-medium text-foreground">Setup script</span>
+            <Textarea
+              size="sm"
+              value={setupScript}
+              onChange={(event) => setSetupScript(event.target.value)}
+              placeholder="npm install -g @openai/codex"
+              disabled={pending !== null}
               spellCheck={false}
             />
           </label>

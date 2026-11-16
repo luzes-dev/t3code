@@ -252,8 +252,18 @@ a sandbox when they need one. An agent that delegates a task to a sandbox gets a
 for it, and an agent already working in a sandbox can hand its work off to a copy of that
 sandbox, uncommitted files included.
 
-If an agent's provider isn't available in a sandbox, use a template snapshot that has its CLI
-installed and signed in.
+To give every sandbox the tools and setup your agents expect, edit the profile and fill in its
+setup:
+
+- **Files to copy** lists paths inside the home folder of the machine this environment runs on,
+  one per line: agent instructions such as `.claude/CLAUDE.md`, skills folders, MCP config, and
+  CLI sign-ins such as `.codex/auth.json`. Sign-in files are copied as they are, so a sandbox
+  holds the same credentials as that machine.
+- **Setup script** runs in the sandbox after the copy, for example to install an agent's CLI.
+
+Each sandbox gets the setup before its first run, and again when the files or the script
+change. A failed setup script is retried the next time T3 Code connects to the sandbox. Large
+tools belong in a template snapshot instead: the copied files are limited to 16 MB.
 
 To start a chat in a sandbox yourself, pick it where you choose **Current checkout** or **New
 worktree** in a new chat's composer (on mobile, tap that control until it shows the sandbox):
@@ -273,8 +283,8 @@ profile requires deleting its sandboxes first. On mobile the same controls are o
 environment's settings page.
 
 Sandboxes stop on their own after the auto-stop window, unless agent work is active. T3 Code
-never starts a stopped sandbox by itself: you resume it, by opening it, sending a message to
-its chat, or with an agent. Disconnecting a sandbox
+never starts a stopped sandbox by itself: you resume it by opening it or its chat, sending a
+message to its chat, or with an agent. Disconnecting a sandbox
 stops routing to it but does not stop its compute: it stays billed until the auto-stop window
 closes, and the sandboxes list says so. Stopping always stops the billable runtime.
 

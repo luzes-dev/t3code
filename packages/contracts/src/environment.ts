@@ -341,6 +341,21 @@ export const SandboxProfileId = TrimmedNonEmptyString.check(
 ).pipe(Schema.brand("SandboxProfileId"));
 export type SandboxProfileId = typeof SandboxProfileId.Type;
 
+/** A path under the controller's home, such as `.claude/skills`; never absolute or escaping it. */
+export const CloudSandboxSetupPath = TrimmedNonEmptyString.check(
+  Schema.isPattern(/^(?![/~\\]|[A-Za-z]:)(?!.*(?:^|[/\\])\.\.(?:[/\\]|$))[^\0\n]+$/u),
+);
+
+/**
+ * The working set every sandbox from a profile gets: files copied from the controller's home
+ * (agent instructions, skills, MCP config, CLI sign-ins) and a script run after the copy.
+ */
+export const CloudSandboxSetup = Schema.Struct({
+  files: Schema.Array(CloudSandboxSetupPath),
+  script: Schema.NullOr(TrimmedNonEmptyString),
+});
+export type CloudSandboxSetup = typeof CloudSandboxSetup.Type;
+
 /**
  * A named provider configuration the server provisions ephemeral sandboxes
  * from. The API key never leaves the server's secret store, so the public
@@ -357,6 +372,7 @@ export const CloudSandboxProfile = Schema.Struct({
   template: Schema.NullOr(TrimmedNonEmptyString),
   monthlyBudgetUsd: Schema.NullOr(Schema.Number.check(Schema.isGreaterThan(0))),
   maxConcurrentSandboxes: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 })),
+  setup: Schema.optionalKey(CloudSandboxSetup),
 });
 export type CloudSandboxProfile = typeof CloudSandboxProfile.Type;
 
@@ -371,6 +387,8 @@ export const CloudSandboxProfileSaveInput = Schema.Struct({
   template: Schema.NullOr(TrimmedNonEmptyString),
   monthlyBudgetUsd: Schema.NullOr(Schema.Number.check(Schema.isGreaterThan(0))),
   maxConcurrentSandboxes: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 })),
+  /** Omitting it keeps the current setup, so older clients never clear one. */
+  setup: Schema.optionalKey(CloudSandboxSetup),
 });
 export type CloudSandboxProfileSaveInput = typeof CloudSandboxProfileSaveInput.Type;
 

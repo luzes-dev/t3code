@@ -9,6 +9,8 @@ import {
   managedSandboxIssueRecovery,
   offersCloudSandboxControl,
   parseSandboxProfileLimits,
+  parseSandboxSetup,
+  sandboxSetupFields,
   type ManagedCloudSandboxIssueRollup,
 } from "@t3tools/client-runtime/state/cloudSandbox";
 import type {
@@ -126,6 +128,8 @@ function SandboxProfileRow({
   const [budget, setBudget] = useState("");
   const [concurrent, setConcurrent] = useState("");
   const [template, setTemplate] = useState("");
+  const [setupFiles, setSetupFiles] = useState("");
+  const [setupScript, setSetupScript] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [pending, setPending] = useState<"save" | "remove" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -135,6 +139,9 @@ function SandboxProfileRow({
     setBudget(profile.monthlyBudgetUsd === null ? "" : String(profile.monthlyBudgetUsd));
     setConcurrent(String(profile.maxConcurrentSandboxes));
     setTemplate(profile.template ?? "");
+    const fields = sandboxSetupFields(profile.setup);
+    setSetupFiles(fields.files);
+    setSetupScript(fields.script);
     setError(null);
     setEditing(true);
   };
@@ -150,6 +157,11 @@ function SandboxProfileRow({
       setError(limits.failure);
       return;
     }
+    const setup = parseSandboxSetup({ files: setupFiles, script: setupScript });
+    if (Result.isFailure(setup)) {
+      setError(setup.failure);
+      return;
+    }
     setPending("save");
     setError(null);
     const result = await saveProfile({
@@ -162,6 +174,7 @@ function SandboxProfileRow({
         autoStopMinutes: profile.autoStopMinutes,
         ...(apiKey.trim() === "" ? {} : { apiKey: apiKey.trim() }),
         ...limits.success,
+        setup: setup.success,
       },
     });
     setPending(null);
@@ -241,6 +254,26 @@ function SandboxProfileRow({
             value={template}
             onChangeText={setTemplate}
             placeholder="None"
+            autoCapitalize="none"
+            autoCorrect={false}
+            editable={pending === null}
+          />
+          <ConnectionFormField
+            label="Files to copy from this environment's home"
+            value={setupFiles}
+            onChangeText={setSetupFiles}
+            placeholder={".claude/CLAUDE.md\n.claude/skills"}
+            multiline
+            autoCapitalize="none"
+            autoCorrect={false}
+            editable={pending === null}
+          />
+          <ConnectionFormField
+            label="Setup script"
+            value={setupScript}
+            onChangeText={setSetupScript}
+            placeholder="npm install -g @openai/codex"
+            multiline
             autoCapitalize="none"
             autoCorrect={false}
             editable={pending === null}

@@ -167,6 +167,8 @@ const make = Effect.gen(function* () {
         : Option.isSome(existing)
           ? existing.value.profile.apiKeySet
           : false;
+    const setup =
+      input.setup ?? (Option.isSome(existing) ? existing.value.profile.setup : undefined);
     const payload: typeof Payload.Type = {
       profile: {
         profileId: input.profileId,
@@ -178,6 +180,7 @@ const make = Effect.gen(function* () {
         template: input.template,
         monthlyBudgetUsd: input.monthlyBudgetUsd,
         maxConcurrentSandboxes: input.maxConcurrentSandboxes,
+        ...(setup === undefined ? {} : { setup }),
       },
       ...(Option.isSome(existing) && existing.value.spend !== undefined
         ? { spend: existing.value.spend }
