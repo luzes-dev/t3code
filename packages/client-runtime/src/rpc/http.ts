@@ -3,6 +3,7 @@ import {
   ManagedCloudSandboxHttpApi,
   EnvironmentHttpCommonError,
   type EnvironmentAuthInvalidError,
+  type EnvironmentConnectApprovalPendingError,
   type EnvironmentInternalError,
   type EnvironmentOperationForbiddenError,
   type EnvironmentRequestInvalidError,
@@ -70,6 +71,7 @@ export type RemoteEnvironmentRequestError =
   | EnvironmentOperationForbiddenError
   | EnvironmentResourceNotFoundError
   | EnvironmentInternalError
+  | EnvironmentConnectApprovalPendingError
   | RemoteEnvironmentAuthFetchError
   | RemoteEnvironmentAuthInvalidJsonError
   | RemoteEnvironmentAuthUndeclaredStatusError

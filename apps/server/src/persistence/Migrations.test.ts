@@ -8,6 +8,8 @@ import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { migrationManifest, runMigrations } from "./Migrations.ts";
+import CloudSandboxes from "./Migrations/097_CloudSandboxes.ts";
+import CloudSandboxChats from "./Migrations/098_CloudSandboxChats.ts";
 
 const v2Migrations = migrationManifest.filter(([id]) => id >= 55);
 const newerMigrationId = Math.max(...migrationManifest.map(([id]) => id)) + 1;
@@ -69,12 +71,18 @@ describe("runMigrations", () => {
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
-  it.effect("upgrades a database at exactly 54", () =>
+  it.effect("upgrades a database at exactly 54, then rechecks it without a write lock", () =>
     Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
       yield* runMigrations({ toMigrationInclusive: 54 });
       assert.deepStrictEqual(yield* runMigrations(), v2Migrations);
       assert.deepStrictEqual(yield* history, migrationManifest);
       assert.isAbove(yield* v2TableCount, 0);
+
+      // query_only rejects BEGIN IMMEDIATE, which CLI startup would otherwise take on the live database.
+      yield* sql`PRAGMA query_only = ON`;
+      assert.deepStrictEqual(yield* runMigrations(), []);
+      assert.deepStrictEqual(yield* history, migrationManifest);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
@@ -178,6 +186,35 @@ describe("runMigrations", () => {
         migrationManifest.filter(([id]) => id >= 70),
       );
       assert.deepStrictEqual(yield* history, migrationManifest);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  it.effect.each([
+    { through: 80, recorded: [[81, "CloudSandboxes"]] },
+    {
+      through: 87,
+      recorded: [
+        [88, "CloudSandboxes"],
+        [89, "CloudSandboxChats"],
+      ],
+    },
+  ] as const)("upgrades a fork database that recorded cloud sandboxes after $through", (fork) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: fork.through });
+      yield* CloudSandboxes;
+      yield* CloudSandboxChats;
+      for (const [id, name] of fork.recorded) {
+        yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (${id}, ${name})`;
+      }
+      yield* sql`INSERT INTO sandbox_profiles (profile_id, payload_json) VALUES ('boat', '{}')`;
+
+      yield* runMigrations();
+
+      assert.deepStrictEqual(yield* history, migrationManifest);
+      assert.deepStrictEqual(yield* sql`SELECT profile_id FROM sandbox_profiles`, [
+        { profile_id: "boat" },
+      ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 

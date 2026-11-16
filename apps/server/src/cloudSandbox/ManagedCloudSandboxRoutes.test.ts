@@ -78,6 +78,7 @@ it.live(
           registerTerminalProcesses: () => Effect.void,
           unregisterTerminal: () => Effect.void,
           trackAgent: () => () => {},
+          watchAgentCommandStops: () => Effect.void,
           stopServer: () => Effect.void,
         }),
       );

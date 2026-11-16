@@ -1,8 +1,7 @@
 /**
- * Follower settings inheritance: the closed allowlist of `ServerSettings`
- * fields a managed cloud sandbox follower may take from its controller host.
- * Unclassified fields, secrets, host paths, provider instances, source-control
- * credentials, and identity configuration stay host-only by rule.
+ * The closed allowlist of `ServerSettings` fields a follower takes from its controller. Secrets,
+ * host paths, provider instances, and credentials stay host-only; the one waiver is a profile's
+ * setup files (CloudSandboxSetupProfile.ts), which the user lists by path.
  */
 import {
   DEFAULT_SERVER_SETTINGS,

@@ -205,6 +205,7 @@ it.effect("excludes persisted ephemeral control server port from discoveredPorts
         registerTerminalProcesses: () => Effect.void,
         unregisterTerminal: () => Effect.void,
         trackAgent: () => () => {},
+        watchAgentCommandStops: () => Effect.void,
         stopServer: () => Effect.void,
       }),
     );

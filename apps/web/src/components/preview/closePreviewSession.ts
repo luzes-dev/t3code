@@ -10,8 +10,11 @@ import {
   releasePreviewExternalServerUrl,
   resolveServerOwnedUrl,
 } from "~/browser/browserTargetResolver";
+import { rendersServerTabNatively } from "~/browser/previewRuntime";
 import { useClosedViewStore } from "~/closedViewStore";
 import { beginPreviewSessionClose, cancelPreviewSessionClose } from "~/previewStateStore";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
+import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
 
 interface ClosePreviewSessionInput<E> {
   readonly closePreview: (input: {
@@ -26,32 +29,41 @@ interface ClosePreviewSessionInput<E> {
 export async function closePreviewSession<E>(
   input: ClosePreviewSessionInput<E>,
 ): Promise<AtomCommandResult<void, E>> {
-  beginPreviewSessionClose(input.threadRef, input.tabId);
+  // Unmounting a webview destroys its page, so a tab this window renders stays mounted until the
+  // server has unloaded it.
+  const keepMounted = rendersServerTabNatively(
+    input.threadRef.environmentId,
+    appAtomRegistry.get(primaryEnvironmentIdAtom),
+    input.snapshot,
+  );
+  if (!keepMounted) beginPreviewSessionClose(input.threadRef, input.tabId);
   const result = await input.closePreview({
     environmentId: input.threadRef.environmentId,
     input: { threadId: input.threadRef.threadId, tabId: input.tabId },
   });
   if (result._tag === "Failure") {
     cancelPreviewSessionClose(input.threadRef, input.snapshot, input.tabId);
-  } else {
-    const snapshot = input.snapshot;
-    const restorable =
-      snapshot === null || snapshot.navStatus._tag === "Idle"
-        ? snapshot
-        : {
-            ...snapshot,
-            navStatus: {
-              ...snapshot.navStatus,
-              url: resolveServerOwnedUrl(input.threadRef.environmentId, snapshot.navStatus.url),
-            },
-          };
-    await releasePreviewExternalServerUrl(input.threadRef.environmentId, input.tabId);
-    if (restorable)
-      useClosedViewStore.getState().remember({
-        kind: "browser",
-        threadRef: input.threadRef,
-        snapshot: restorable,
-      });
+    return result;
+  }
+  if (keepMounted) beginPreviewSessionClose(input.threadRef, input.tabId);
+  const snapshot = input.snapshot;
+  const restorable =
+    snapshot === null || snapshot.navStatus._tag === "Idle"
+      ? snapshot
+      : {
+          ...snapshot,
+          navStatus: {
+            ...snapshot.navStatus,
+            url: resolveServerOwnedUrl(input.threadRef.environmentId, snapshot.navStatus.url),
+          },
+        };
+  await releasePreviewExternalServerUrl(input.threadRef.environmentId, input.tabId);
+  if (restorable) {
+    useClosedViewStore.getState().remember({
+      kind: "browser",
+      threadRef: input.threadRef,
+      snapshot: restorable,
+    });
   }
   return result;
 }
