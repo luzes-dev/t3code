@@ -31,7 +31,6 @@ import {
   resolvePreviousWorktreeLabel,
   resolvePreviousWorktreeSeed,
   shouldShowEnvironmentIndicator,
-  resolveSandboxPickerItems,
 } from "./BranchToolbar.logic";
 import {
   BranchToolbarBranchSelector,
@@ -71,6 +70,7 @@ import { cn } from "~/lib/utils";
 import { observeResize } from "~/lib/observeResize";
 import { useAtom } from "@effect/atom-react";
 import { selectableManagedSandboxesAtom } from "~/connection/cloudSandbox";
+import { resolveSandboxPickerItems } from "@t3tools/client-runtime/state/cloudSandbox";
 import { draftSandboxTargetAtom } from "~/state/cloudSandboxChats";
 import { sandboxProfilesList } from "~/state/cloudSandboxProfiles";
 import { useEnvironmentQuery } from "~/state/query";

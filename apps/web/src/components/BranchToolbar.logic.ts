@@ -1,7 +1,5 @@
 import type {
-  CloudSandboxChatTarget,
   EnvironmentId,
-  ManagedCloudSandboxResourceId,
   EnvironmentMachineKind,
   VcsRef,
   ProjectId,
@@ -95,50 +93,6 @@ export function resolveContextStripLabelsCompact(input: {
 
 export function resolveEnvModeLabel(mode: EnvMode): string {
   return mode === "worktree" ? "New worktree" : "Current checkout";
-}
-
-export interface SandboxPickerItem {
-  readonly value: string;
-  readonly label: string;
-  readonly target: CloudSandboxChatTarget;
-}
-
-/**
- * The run-target picker's sandbox rows: a new or the project's follower once a profile exists,
- * and the sandbox already open here when there is one.
- */
-export function resolveSandboxPickerItems(input: {
-  readonly hasProfile: boolean;
-  readonly current: {
-    readonly resourceId: ManagedCloudSandboxResourceId;
-    readonly label: string;
-  } | null;
-}): ReadonlyArray<SandboxPickerItem> {
-  return [
-    ...(input.hasProfile
-      ? [
-          { value: "sandbox:new", label: "New sandbox", target: { _tag: "new" } } as const,
-          {
-            value: "sandbox:project",
-            label: "Project's sandbox",
-            target: { _tag: "project" },
-          } as const,
-        ]
-      : []),
-    ...(input.current === null
-      ? []
-      : [
-          {
-            value: "sandbox:current",
-            label: `Current sandbox · ${input.current.label}`,
-            target: { _tag: "current", resourceId: input.current.resourceId } as const,
-          },
-        ]),
-  ];
-}
-
-export function sandboxPickerValue(target: CloudSandboxChatTarget | null): string | null {
-  return target === null ? null : `sandbox:${target._tag}`;
 }
 
 export const WORKTREE_SUBMODULES_LABELS: Record<WorktreeSubmodules, string> = {

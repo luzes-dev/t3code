@@ -20,6 +20,9 @@ import {
   describeManagedCloudSandboxIssue,
   isSelectableEnvironment,
   managedSandboxIssueRollup,
+  nextRunTarget,
+  resolveSandboxPickerItems,
+  type RunTarget,
   offersCloudSandboxControl,
   parseSandboxProfileLimits,
   selectableEnvironmentIds,
@@ -314,5 +317,37 @@ describe("managedSandboxIssueRollup", () => {
     expect(describeManagedCloudSandboxIssue(issue)).toBe(
       "Connection lost: The managed cloud connection could not be established.",
     );
+  });
+});
+
+describe("resolveSandboxPickerItems", () => {
+  const current = { resourceId: ManagedCloudSandboxResourceId.make("open-vm"), label: "atlas" };
+
+  it("offers no sandbox rows without a profile or an open sandbox", () => {
+    expect(resolveSandboxPickerItems({ hasProfile: false, current: null })).toEqual([]);
+  });
+
+  it("offers new and project sandboxes with a profile, and the open one only when it exists", () => {
+    expect(
+      resolveSandboxPickerItems({ hasProfile: true, current: null }).map((item) => item.value),
+    ).toEqual(["sandbox:new", "sandbox:project"]);
+    expect(resolveSandboxPickerItems({ hasProfile: true, current }).at(-1)).toEqual({
+      value: "sandbox:current",
+      label: "Current sandbox · atlas",
+      target: { _tag: "current", resourceId: current.resourceId },
+    });
+  });
+});
+
+describe("nextRunTarget", () => {
+  it("cycles the checkout, a new worktree, then each sandbox, and back", () => {
+    const items = resolveSandboxPickerItems({ hasProfile: true, current: null });
+    const seen: Array<string> = [];
+    let target: RunTarget = { kind: "local" };
+    for (let step = 0; step < 4; step++) {
+      target = nextRunTarget(target, items);
+      seen.push(target.kind === "sandbox" ? target.item.value : target.kind);
+    }
+    expect(seen).toEqual(["worktree", "sandbox:new", "sandbox:project", "local"]);
   });
 });

@@ -14,6 +14,8 @@ import { mobilePreferencesAtom } from "../../state/preferences";
 import { parseThreadKey, threadKey } from "@t3tools/client-runtime/state/entities";
 import { createThreadVisitTracker } from "@t3tools/client-runtime/state/thread-visits";
 import { useChildThreadInputs, useThreadReportedModelSelection } from "../../state/entities";
+import { SANDBOX_BRIDGE_INSTANCE_ID } from "@t3tools/contracts";
+import { SandboxSettleCard } from "./SandboxSettleCard";
 import { UsageLimitRecoveryCard } from "./UsageLimitRecoveryCard";
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import {
@@ -1670,6 +1672,14 @@ function ThreadDetailBody(
                       thread={props.selectedThread}
                       environmentId={props.environmentId}
                     />
+                    {props.selectedThread.modelSelection.instanceId ===
+                      SANDBOX_BRIDGE_INSTANCE_ID &&
+                    props.selectedThread.settledOverride === "settled" ? (
+                      <SandboxSettleCard
+                        environmentId={props.environmentId}
+                        threadId={props.selectedThread.id}
+                      />
+                    ) : null}
                     <ChildThreadApprovals
                       threadRef={props.selectedThreadDetailRef}
                       maxHeight={pendingUserInputMaxHeight}

@@ -4,7 +4,7 @@ import { page, userEvent } from "vite-plus/test/browser";
 
 import "~/index.css";
 import { render } from "../../test/render";
-import { resolveSandboxPickerItems } from "./BranchToolbar.logic";
+import { resolveSandboxPickerItems } from "@t3tools/client-runtime/state/cloudSandbox";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
 
 describe("BranchToolbarEnvModeSelector sandbox targets", () => {

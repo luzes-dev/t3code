@@ -1,4 +1,5 @@
 import {
+  type CloudSandboxChatTarget,
   type CloudSandboxProfileStatus,
   type EnvironmentId,
   type ManagedCloudSandboxControlOperation,
@@ -287,4 +288,71 @@ export function createManagedSandboxAtoms<R, E>(
     }),
   });
   return { list, selectable, issues, remove };
+}
+
+export interface SandboxPickerItem {
+  readonly value: string;
+  readonly label: string;
+  readonly target: CloudSandboxChatTarget;
+}
+
+/**
+ * The run-target picker's sandbox rows: a new or the project's follower once a profile exists,
+ * and the sandbox already open here when there is one.
+ */
+export function resolveSandboxPickerItems(input: {
+  readonly hasProfile: boolean;
+  readonly current: {
+    readonly resourceId: ManagedCloudSandboxResourceId;
+    readonly label: string;
+  } | null;
+}): ReadonlyArray<SandboxPickerItem> {
+  return [
+    ...(input.hasProfile
+      ? [
+          { value: "sandbox:new", label: "New sandbox", target: { _tag: "new" } } as const,
+          {
+            value: "sandbox:project",
+            label: "Project's sandbox",
+            target: { _tag: "project" },
+          } as const,
+        ]
+      : []),
+    ...(input.current === null
+      ? []
+      : [
+          {
+            value: "sandbox:current",
+            label: `Current sandbox · ${input.current.label}`,
+            target: { _tag: "current", resourceId: input.current.resourceId } as const,
+          },
+        ]),
+  ];
+}
+
+export function sandboxPickerValue(target: CloudSandboxChatTarget | null): string | null {
+  return target === null ? null : `sandbox:${target._tag}`;
+}
+
+/** A run target in the order a single control cycles through them, as mobile's tap does. */
+export type RunTarget =
+  | { readonly kind: "local" }
+  | { readonly kind: "worktree" }
+  | { readonly kind: "sandbox"; readonly item: SandboxPickerItem };
+
+export function nextRunTarget(
+  current: RunTarget,
+  sandboxItems: ReadonlyArray<SandboxPickerItem>,
+): RunTarget {
+  const order: ReadonlyArray<RunTarget> = [
+    { kind: "local" },
+    { kind: "worktree" },
+    ...sandboxItems.map((item) => ({ kind: "sandbox" as const, item })),
+  ];
+  const index = order.findIndex((target) =>
+    target.kind === "sandbox" && current.kind === "sandbox"
+      ? target.item.value === current.item.value
+      : target.kind === current.kind,
+  );
+  return order[(index + 1) % order.length] ?? { kind: "local" };
 }

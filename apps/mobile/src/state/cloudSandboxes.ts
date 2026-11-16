@@ -1,4 +1,8 @@
-import { createManagedSandboxAtoms } from "@t3tools/client-runtime/state/cloudSandbox";
+import {
+  createManagedSandboxAtoms,
+  type SandboxPickerItem,
+} from "@t3tools/client-runtime/state/cloudSandbox";
+import { Atom } from "effect/reactivity";
 import {
   createEnvironmentRpcCommand,
   createEnvironmentRpcQueryAtomFamily,
@@ -43,3 +47,28 @@ export const selectableManagedSandboxesAtom = managedSandboxes.selectable;
 // Degraded followers, collapsed per cause: one warning naming one fix.
 export const managedSandboxIssuesAtom = managedSandboxes.issues;
 export const deleteManagedSandbox = managedSandboxes.remove;
+
+export const sandboxChatStart = createEnvironmentRpcCommand(connectionAtomRuntime, {
+  label: "mobile:cloud-sandbox-chats:start",
+  tag: WS_METHODS.cloudSandboxChatStart,
+});
+
+export const sandboxChatState = createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
+  label: "mobile:cloud-sandbox-chats:state",
+  tag: WS_METHODS.cloudSandboxChatState,
+  staleTimeMs: 0,
+});
+
+export const sandboxChatResolveSettle = createEnvironmentRpcCommand(connectionAtomRuntime, {
+  label: "mobile:cloud-sandbox-chats:resolve-settle",
+  tag: WS_METHODS.cloudSandboxChatResolveSettle,
+  onSuccess: ({ environmentId, input }, registry) =>
+    Effect.sync(() =>
+      registry.refresh(sandboxChatState({ environmentId, input: { threadId: input.threadId } })),
+    ),
+});
+
+/** The sandbox a new task's draft will run on; null runs it on the checkout or a worktree. */
+export const draftSandboxTargetAtom = Atom.family((_draftKey: string) =>
+  Atom.make<SandboxPickerItem | null>(null).pipe(Atom.keepAlive),
+);

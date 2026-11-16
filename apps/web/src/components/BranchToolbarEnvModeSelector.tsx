@@ -8,10 +8,12 @@ import {
   resolveCurrentWorkspaceLabel,
   resolveEnvModeLabel,
   resolveLockedWorkspaceLabel,
-  sandboxPickerValue,
   type EnvMode,
-  type SandboxPickerItem,
 } from "./BranchToolbar.logic";
+import {
+  sandboxPickerValue,
+  type SandboxPickerItem,
+} from "@t3tools/client-runtime/state/cloudSandbox";
 import { useComposerMenuProps } from "./chat/composerEventScope";
 import { PreviousWorktreeItemContent } from "./PreviousWorktreeItemContent";
 import {

@@ -10,10 +10,22 @@ import { useRememberThreadProject } from "./useRememberThreadProject";
 import { scopedProjectKey } from "../../lib/scopedEntities";
 import { connectionTone } from "../connection/connectionTone";
 import { AppBar } from "../../components/ui/AppBar";
-import { ThreadId } from "@t3tools/contracts";
+import { MessageId, ThreadId } from "@t3tools/contracts";
+import {
+  nextRunTarget,
+  resolveSandboxPickerItems,
+  type RunTarget,
+} from "@t3tools/client-runtime/state/cloudSandbox";
+import {
+  draftSandboxTargetAtom,
+  sandboxChatStart,
+  sandboxProfilesList,
+  selectableManagedSandboxesAtom,
+} from "../../state/cloudSandboxes";
+import { useEnvironmentQuery } from "../../state/query";
 
 import * as Dialog from "../../components/ui/Dialog";
-import { useAtomValue } from "@effect/atom-react";
+import { useAtom, useAtomValue } from "@effect/atom-react";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { pickableProjectGroups } from "@t3tools/client-runtime/state/project-grouping";
@@ -547,10 +559,42 @@ export function NewTaskDraftScreen(props: {
     workspaceMode: flow.workspaceMode,
     pullRequestReference: flow.pullRequestReference,
   });
-  const workspaceLabel = resolveNewTaskWorkspaceLabel({
-    workspaceMode: flow.workspaceMode,
-    worktreePath: flow.selectedWorktreePath,
+  const sandboxEnvironmentId = flow.selectedProject?.environmentId ?? null;
+  const sandboxProfiles = useEnvironmentQuery(
+    sandboxEnvironmentId === null
+      ? null
+      : sandboxProfilesList({ environmentId: sandboxEnvironmentId, input: {} }),
+  );
+  const openSandboxes = useEnvironmentQuery(
+    sandboxEnvironmentId === null ? null : selectableManagedSandboxesAtom(sandboxEnvironmentId),
+  );
+  const openSandbox = openSandboxes.data?.find((resource) => resource.phase === "connected");
+  const sandboxItems = resolveSandboxPickerItems({
+    hasProfile: (sandboxProfiles.data?.profiles.length ?? 0) > 0,
+    current:
+      openSandbox === undefined
+        ? null
+        : { resourceId: openSandbox.resourceId, label: openSandbox.label },
   });
+  const [sandboxItem, setSandboxItem] = useAtom(draftSandboxTargetAtom(flow.draftKey ?? ""));
+  const startSandboxChat = useAtomCommand(sandboxChatStart, { reportFailure: false });
+  const runTarget: RunTarget =
+    sandboxItem === null ? { kind: flow.workspaceMode } : { kind: "sandbox", item: sandboxItem };
+  const cycleRunTarget = () => {
+    const next = nextRunTarget(runTarget, sandboxItems);
+    if (next.kind === "sandbox") {
+      setSandboxItem(next.item);
+      return;
+    }
+    setSandboxItem(null);
+    flow.setWorkspaceMode(next.kind);
+  };
+  const workspaceLabel =
+    sandboxItem?.label ??
+    resolveNewTaskWorkspaceLabel({
+      workspaceMode: flow.workspaceMode,
+      worktreePath: flow.selectedWorktreePath,
+    });
   const showBranchLoading =
     environmentConnected && flow.branchesLoading && flow.availableBranches.length === 0;
 
@@ -654,6 +698,48 @@ export function NewTaskDraftScreen(props: {
       return null;
     }
 
+    if (sandboxItem !== null) {
+      if (initialMessageText.length === 0) return null;
+      flow.setSubmitting(true);
+      const threadId = ThreadId.make(creationMetadata.threadId);
+      const started = await startSandboxChat({
+        environmentId: selectedProject.environmentId,
+        input: {
+          threadId,
+          projectId: selectedProject.id,
+          target: sandboxItem.target,
+          message: {
+            messageId: MessageId.make(creationMetadata.messageId),
+            text: initialMessageText,
+            title: initialMessageText.slice(0, 80).trim(),
+          },
+          runtimeMode: flow.runtimeMode,
+          interactionMode: "default",
+        },
+      });
+      flow.setSubmitting(false);
+      if (AsyncResult.isFailure(started)) {
+        const error = squashAtomCommandFailure(started);
+        Dialog.alert(
+          "Could not start on the sandbox",
+          error instanceof Error ? error.message : "The sandbox chat could not start.",
+        );
+        return null;
+      }
+      promptInputRef.current?.blur();
+      navigation.dispatch(
+        CommonActions.setParams(
+          submittedThreadParams(String(selectedProject.environmentId), String(threadId)),
+        ),
+      );
+      abortComposerDraftOperations(draftKey);
+      clearComposerDraftContent(draftKey, {
+        clearModelSelection: true,
+        clearWorkspaceSelection: true,
+      });
+      setSandboxItem(null);
+      return MessageId.make(creationMetadata.messageId);
+    }
     const message = flow.buildPendingTaskMessage(creationMetadata, {
       currentCheckoutBranch: queuesInsteadOfStarting ? null : flow.currentCheckoutBranchName,
     });
@@ -870,7 +956,7 @@ export function NewTaskDraftScreen(props: {
   const workspaceControls = (
     <View className="flex-row items-center gap-1 px-2">
       <ComposerInlineControl
-        accessibilityHint={`Switches to ${flow.workspaceMode === "local" ? "a new worktree" : "the current checkout"}`}
+        accessibilityHint="Switches where the task runs"
         accessibilityLabel={workspaceLabel}
         disabled={isComposerInteractionLocked || !flow.isGitRepo}
         renderIcon={(size) => (
@@ -882,7 +968,7 @@ export function NewTaskDraftScreen(props: {
         )}
         label={workspaceLabel}
         maxWidth="100%"
-        onPress={() => flow.setWorkspaceMode(flow.workspaceMode === "local" ? "worktree" : "local")}
+        onPress={cycleRunTarget}
         showChevron={false}
       />
 

@@ -1,9 +1,4 @@
-import {
-  ManagedCloudSandboxResourceId,
-  ProviderInstanceId,
-  RunId,
-  type VcsRef,
-} from "@t3tools/contracts";
+import { ProviderInstanceId, RunId, type VcsRef } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import { dedupeRemoteBranchesWithLocalMatches } from "@t3tools/shared/git";
 import {
@@ -15,7 +10,6 @@ import {
   resolveBranchToolbarPrBranch,
   resolveLocalCheckoutBranchMismatch,
   resolveLockedWorkspaceLabel,
-  resolveSandboxPickerItems,
   sanitizeNewRefName,
   shouldIncludeBranchPickerItem,
 } from "./BranchToolbar.logic";
@@ -331,24 +325,5 @@ describe("sanitizeNewRefName", () => {
   it("does not collapse dashes the user typed", () => {
     expect(sanitizeNewRefName("new - branch")).toBe("new---branch");
     expect(sanitizeNewRefName("foo--bar")).toBe("foo--bar");
-  });
-});
-
-describe("resolveSandboxPickerItems", () => {
-  const current = { resourceId: ManagedCloudSandboxResourceId.make("open-vm"), label: "atlas" };
-
-  it("offers no sandbox rows without a profile or an open sandbox", () => {
-    expect(resolveSandboxPickerItems({ hasProfile: false, current: null })).toEqual([]);
-  });
-
-  it("offers new and project sandboxes with a profile, and the open one only when it exists", () => {
-    expect(
-      resolveSandboxPickerItems({ hasProfile: true, current: null }).map((item) => item.value),
-    ).toEqual(["sandbox:new", "sandbox:project"]);
-    expect(resolveSandboxPickerItems({ hasProfile: true, current }).at(-1)).toEqual({
-      value: "sandbox:current",
-      label: "Current sandbox · atlas",
-      target: { _tag: "current", resourceId: current.resourceId },
-    });
   });
 });
