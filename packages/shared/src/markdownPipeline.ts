@@ -839,8 +839,15 @@ interface ImageSourceNode {
     readonly dataDarkSrc?: unknown;
     readonly dataLightSrc?: unknown;
   };
+  readonly position?: {
+    readonly start: { readonly offset?: number };
+    readonly end: { readonly offset?: number };
+  };
   readonly children?: ReadonlyArray<ImageSourceNode>;
 }
+
+const imageSourceTree = (markdown: string) =>
+  imageSourceProcessor.runSync(imageSourceProcessor.parse(markdown)) as ImageSourceNode;
 
 /**
  * The sources of the images chat markdown shows, read as ChatMarkdown's `img` renderer reads
@@ -864,6 +871,32 @@ export function chatMarkdownImageSources(markdown: string): Array<string> {
     }
     node.children?.forEach(visit);
   };
-  visit(imageSourceProcessor.runSync(imageSourceProcessor.parse(markdown)) as ImageSourceNode);
+  visit(imageSourceTree(markdown));
   return sources;
+}
+
+export interface ChatMarkdownImageSpan {
+  readonly source: string;
+  /** Where the image (`![…](…)` or `<img …>`) is written in the markdown. */
+  readonly start: number;
+  readonly end: number;
+}
+
+/** Each image's own `src` with where it is written, for rewriting it in place. */
+export function chatMarkdownImageSpans(markdown: string): Array<ChatMarkdownImageSpan> {
+  const spans: Array<ChatMarkdownImageSpan> = [];
+  const visit = (node: ImageSourceNode) => {
+    if (node.type === "element" && node.tagName === "img") {
+      const { src, dataLocalSrc } = node.properties ?? {};
+      const source = typeof dataLocalSrc === "string" ? dataLocalSrc : src;
+      const start = node.position?.start.offset;
+      const end = node.position?.end.offset;
+      if (typeof source === "string" && start !== undefined && end !== undefined) {
+        spans.push({ source: normalizeMarkdownLinkDestination(source), start, end });
+      }
+    }
+    node.children?.forEach(visit);
+  };
+  visit(imageSourceTree(markdown));
+  return spans;
 }

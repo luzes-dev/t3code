@@ -7,7 +7,8 @@ import { isUncPath, isWindowsDrivePath, normalizeProjectPathForComparison } from
 
 const parser = unified().use(remarkParse);
 
-function imageEmbed(path: string): string {
+/** A host file as an image destination every client resolves back to the same path. */
+export function hostImageDestination(path: string): string {
   // Forward slashes read the same in every client parser; UNC paths also need file: to
   // distinguish them from protocol-relative web URLs.
   const destination = isWindowsDrivePath(path)
@@ -17,8 +18,11 @@ function imageEmbed(path: string): string {
       : path;
   // Clients split `?`/`#`, decode `%` and `&` entities, and read POSIX backslashes as escapes;
   // line breaks end an angle destination.
-  const escaped = destination.replace(/[%?#&\\\r\n]/g, encodeURIComponent).replace(/[<>]/g, "\\$&");
-  return `![](<${escaped}>)`;
+  return destination.replace(/[%?#&\\\r\n]/g, encodeURIComponent);
+}
+
+function imageEmbed(path: string): string {
+  return `![](<${hostImageDestination(path).replace(/[<>]/g, "\\$&")}>)`;
 }
 
 // An unclosed fence or raw HTML block swallows the rest of the reply. Only a root-level block

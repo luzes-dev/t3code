@@ -8,6 +8,7 @@ export * from "./auth.ts";
 export * from "./environment.ts";
 export * from "./managedCloudSandbox.ts";
 export * from "./managedCloudSandboxHttp.ts";
+export * from "./sandboxBridge.ts";
 export * from "./environmentHttp.ts";
 export * from "./relayClient.ts";
 export * from "./desktopBootstrap.ts";
