@@ -30,6 +30,8 @@ import {
 } from "@t3tools/sandbox-bridge/link";
 import { resolveSelfInvocation, selfInvocationArgs } from "@t3tools/shared/nodeRuntime";
 import * as Cause from "effect/Cause";
+import * as Fiber from "effect/Fiber";
+import * as Schedule from "effect/Schedule";
 import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -255,6 +257,32 @@ const make = Effect.gen(function* () {
     });
   });
 
+  /**
+   * While `manager.provision` runs, follow the record it builds: creating the VM is quick,
+   * pairing and tunneling the follower is the long pole the card should name separately.
+   */
+  const watchProvisionStages = Effect.fn("SandboxChats.watchProvisionStages")(function* (
+    threadId: ThreadId,
+    resourceId: ManagedCloudSandboxResourceId,
+  ) {
+    let connected = false;
+    yield* Effect.gen(function* () {
+      const record = yield* manager.get(resourceId).pipe(Effect.option);
+      if (Option.isNone(record) || connected) return;
+      if (record.value.sandboxId === null) return;
+      connected = true;
+      yield* setupTracker.update(threadId, (snapshot) => ({
+        ...snapshot,
+        sandbox:
+          snapshot.sandbox === null
+            ? null
+            : { ...snapshot.sandbox, sandboxId: record.value.sandboxId },
+      }));
+      yield* setupTracker.stageStatus(threadId, "provision", "done");
+      yield* setupTracker.stageStatus(threadId, "connect", "running");
+    }).pipe(Effect.repeat({ schedule: Schedule.spaced("1 second") }));
+  });
+
   /** The follower a target names, provisioned with this chat as owner when it is new. */
   const acquire = Effect.fn("SandboxChats.acquire")(function* (
     row: ChatRow,
@@ -265,8 +293,10 @@ const make = Effect.gen(function* () {
       const reusing =
         existing.value.phase === "stopped" ? "Restarting this sandbox" : "Already running";
       yield* setupTracker.stageStatus(row.thread_id, "provision", "running", reusing);
+      yield* setupTracker.stageStatus(row.thread_id, "connect", "running", reusing);
       const resumed = yield* manager.connect(row.resource_id, { resume: true });
       yield* setupTracker.stageStatus(row.thread_id, "provision", "done", reusing);
+      yield* setupTracker.stageStatus(row.thread_id, "connect", "done", reusing);
       return resumed;
     }
     if (row.target === "current")
@@ -279,24 +309,50 @@ const make = Effect.gen(function* () {
       return yield* new CloudSandboxChatError({
         message: "No sandbox profile is configured. Add one in Settings → Environments.",
       });
-    yield* setupTracker.stageStatus(row.thread_id, "provision", "running");
-    const provisioned = yield* manager.provision({
-      operationId: row.resource_id,
-      profile: profile.profileId,
+    yield* setupTracker.update(row.thread_id, (snapshot) => ({
+      ...snapshot,
       sandbox: {
-        requestId: row.resource_id,
-        ...(profile.template === null ? {} : { template: profile.template }),
-        name: input.title.slice(0, 60),
-        size: profile.defaultSize ?? "default",
-        autoStopMinutes: profile.autoStopMinutes,
+        profile: profile.profileId,
+        size: profile.defaultSize ?? null,
+        sandboxId: null,
       },
-      // The chat owns its follower from the first record write, before the provider answers.
-      ownership: {
-        sourceThreadId: row.thread_id,
-        retention: row.target === "new" ? "delete-on-completion" : "stop-and-retain",
-      },
-    });
-    yield* setupTracker.stageStatus(row.thread_id, "provision", "done");
+    }));
+    yield* setupTracker.stageStatus(
+      row.thread_id,
+      "provision",
+      "running",
+      "Requesting the sandbox",
+    );
+    const watcher = yield* watchProvisionStages(row.thread_id, row.resource_id).pipe(
+      Effect.forkDetach,
+    );
+    const provisioned = yield* manager
+      .provision({
+        operationId: row.resource_id,
+        profile: profile.profileId,
+        sandbox: {
+          requestId: row.resource_id,
+          ...(profile.template === null ? {} : { template: profile.template }),
+          name: input.title.slice(0, 60),
+          size: profile.defaultSize ?? "default",
+          autoStopMinutes: profile.autoStopMinutes,
+        },
+        // The chat owns its follower from the first record write, before the provider answers.
+        ownership: {
+          sourceThreadId: row.thread_id,
+          retention: row.target === "new" ? "delete-on-completion" : "stop-and-retain",
+        },
+      })
+      .pipe(
+        Effect.tap(() =>
+          Effect.gen(function* () {
+            yield* setupTracker.stageStatus(row.thread_id, "provision", "done");
+            yield* setupTracker.stageStatus(row.thread_id, "connect", "done");
+          }),
+        ),
+        // A new sandbox may appear without an observed intermediate record update.
+        Effect.ensuring(Fiber.interrupt(watcher).pipe(Effect.ignore)),
+      );
     return provisioned;
   });
 

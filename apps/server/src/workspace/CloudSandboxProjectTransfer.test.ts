@@ -134,6 +134,117 @@ it.live(
     ),
 );
 
+it.live("transfers a checkout with git submodules as uninitialized gitlinks that stay clean", () =>
+  Effect.gen(function* () {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "sandbox-transfer-"));
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+    );
+    const origin = NodePath.join(directory, "sub-origin");
+    const repository = NodePath.join(directory, "source");
+    const cwd = NodePath.join(directory, "linked");
+    const remoteHome = NodePath.join(directory, "remote");
+    NodeFS.mkdirSync(origin);
+    NodeFS.mkdirSync(repository);
+    NodeFS.mkdirSync(remoteHome);
+    const git = (at: string, args: string[], options?: { env?: NodeJS.ProcessEnv }) =>
+      NodeChildProcess.execFileSync("git", args, {
+        cwd: at,
+        encoding: "utf8",
+        ...(options === undefined ? {} : { env: { ...process.env, ...options.env } }),
+      }).trim();
+    git(origin, ["init", "-q", "-b", "main"]);
+    git(origin, ["config", "user.email", "test@example.com"]);
+    git(origin, ["config", "user.name", "Test"]);
+    NodeFS.writeFileSync(NodePath.join(origin, "inner"), "inner");
+    git(origin, ["add", "inner"]);
+    git(origin, ["commit", "-qm", "inner"]);
+    git(repository, ["init", "-q", "-b", "main"]);
+    git(repository, ["config", "user.email", "test@example.com"]);
+    git(repository, ["config", "user.name", "Test"]);
+    NodeFS.writeFileSync(NodePath.join(repository, "tracked"), "outer");
+    git(repository, ["add", "tracked"]);
+    git(repository, [
+      "-c",
+      "protocol.file.allow=always",
+      "submodule",
+      "add",
+      "-q",
+      origin,
+      "vendored",
+    ]);
+    git(repository, ["commit", "-qm", "outer"]);
+    git(repository, ["worktree", "add", "-q", "-b", "linked", cwd]);
+    // An initialized submodule's checkout must not ship: the gitlink ships as its
+    // empty directory instead, which git reports as a clean uninitialized submodule.
+    NodeFS.writeFileSync(NodePath.join(cwd, "vendored", "checked-out"), "must not transfer");
+
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const ssh = ChildProcessSpawner.make((command) => {
+      if (command._tag === "StandardCommand" && command.command === "ssh") {
+        return spawner.spawn(
+          ChildProcess.make(
+            "sh",
+            ["-c", command.args.slice(command.args.indexOf("--") + 2).join(" ")],
+            {
+              ...command.options,
+              env: { HOME: remoteHome },
+              extendEnv: true,
+            },
+          ),
+        );
+      }
+      return spawner.spawn(command);
+    });
+    const resourceId = ManagedCloudSandboxResourceId.make("workspace-submodules");
+    const manager = Layer.mock(Manager.CloudSandboxManager)({
+      withConnection: (_id, effect) =>
+        Effect.scoped(
+          effect(
+            { alias: "child", hostname: "child.invalid", username: "sandbox", port: 22 },
+            {
+              httpBaseUrl: "http://child.invalid",
+              pairingToken: "fixture",
+              connection: {
+                sandboxId: "sandbox",
+                driverKind: "boat",
+                resourceId,
+                controllerEnvironmentId: EnvironmentId.make("controller"),
+                environmentId: EnvironmentId.make("child"),
+                label: "Child",
+                routePrefix: "/proxy",
+                bearerToken: "fixture",
+              },
+            },
+          ),
+        ),
+    });
+    const transfer = yield* Transfer.CloudSandboxProjectTransfer.pipe(
+      Effect.provide(
+        Transfer.layer.pipe(
+          Layer.provide(manager),
+          Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, ssh)),
+        ),
+      ),
+    );
+    const target = yield* transfer.transfer({ resourceId, cwd });
+    expect(git(target, ["status", "--porcelain"])).toBe("");
+    expect(NodeFS.existsSync(NodePath.join(target, "vendored", "checked-out"))).toBe(false);
+    expect(git(target, ["rev-parse", "HEAD"])).toBe(git(cwd, ["rev-parse", "HEAD"]));
+  }).pipe(
+    Effect.provide(
+      Git.layer.pipe(
+        Layer.provide(VcsProcess.layer),
+        Layer.provideMerge(
+          ServerConfig.layerTest(process.cwd(), { prefix: "sandbox-transfer-config-" }),
+        ),
+        Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+      ),
+    ),
+    Effect.scoped,
+  ),
+);
+
 it.live(
   "transfers unborn repositories, shallow clones, symlinked subdirectory cwds, and uses POSIX mv without -T",
   () =>

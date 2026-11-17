@@ -16,6 +16,7 @@ function snapshot(overrides: Partial<WorktreeSetupSnapshot>): WorktreeSetupSnaps
     baseRef: "main",
     worktreePath: "/repo/.t3/worktrees/feature",
     setupScript: null,
+    sandbox: null,
     stages: [
       {
         id: "fetch",
@@ -87,11 +88,21 @@ it("names sandbox snapshots after the sandbox", async () => {
         baseRef: null,
         worktreePath: null,
         setupScript: null,
+        sandbox: { profile: "boat", size: "small", sandboxId: "vm-abc123" },
         stages: [
           {
             id: "provision",
             status: "running",
             startedAt: "2026-10-26T12:00:00.000Z",
+            endedAt: null,
+            percent: null,
+            detail: null,
+            tail: [],
+          },
+          {
+            id: "connect",
+            status: "pending",
+            startedAt: null,
             endedAt: null,
             percent: null,
             detail: null,
@@ -112,9 +123,15 @@ it("names sandbox snapshots after the sandbox", async () => {
   );
   const section = screen.getByRole("region", { name: "Worktree setup" });
 
-  expect(section.element().textContent).toContain("Provision sandbox");
+  expect(section.element().textContent).toContain("Create sandbox");
+  expect(section.element().textContent).toContain("Connect to sandbox");
   expect(section.element().textContent).toContain("Copy project");
   expect(section.element().textContent).not.toContain("worktree");
+  // Details names the follower being set up.
+  await screen.getByRole("button", { name: "Details" }).click();
+  expect(section.element().textContent).toContain("Profile");
+  expect(section.element().textContent).toContain("boat");
+  expect(section.element().textContent).toContain("vm-abc123");
   // A cancelled sandbox setup gets its own header copy.
   await using cancelled = await render(
     card(

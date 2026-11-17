@@ -156,6 +156,7 @@ export const make = Effect.gen(function* () {
         baseRef: input.baseRef,
         worktreePath: null,
         setupScript: null,
+        sandbox: null,
         stages: ordered.map(emptyStage),
         error: null,
         sequence: (lastSequenceByThread.get(input.threadId) ?? -1) + 1,

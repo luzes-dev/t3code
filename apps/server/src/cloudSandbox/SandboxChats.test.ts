@@ -364,6 +364,7 @@ it.effect(
       expect(midFlight?.phase).toBe("running");
       expect(midFlight?.stages.map((stage) => [stage.id, stage.status])).toEqual([
         ["provision", "running"],
+        ["connect", "pending"],
         ["copy", "pending"],
         ["register", "pending"],
         ["start", "pending"],
@@ -376,6 +377,7 @@ it.effect(
       expect(finalSnapshot.phase).toBe("done");
       expect(finalSnapshot.stages.map((stage) => [stage.id, stage.status])).toEqual([
         ["provision", "done"],
+        ["connect", "done"],
         ["copy", "done"],
         ["register", "done"],
         ["start", "done"],

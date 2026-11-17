@@ -15,6 +15,7 @@ export const WorktreeSetupStageId = Schema.Literals([
   "agent",
   // Cloud sandbox chats publish these instead of the worktree stages.
   "provision",
+  "connect",
   "copy",
   "register",
   "start",
@@ -60,6 +61,14 @@ export const WorktreeSetupSnapshot = Schema.Struct({
       terminalId: TrimmedNonEmptyString,
     }),
   ),
+  /** Sandbox snapshots describe the follower being set up; worktree setups leave it null. */
+  sandbox: Schema.NullOr(
+    Schema.Struct({
+      profile: TrimmedNonEmptyString,
+      size: Schema.NullOr(TrimmedNonEmptyString),
+      sandboxId: Schema.NullOr(TrimmedNonEmptyString),
+    }),
+  ),
   stages: Schema.Array(WorktreeSetupStage),
   error: Schema.NullOr(Schema.String.check(Schema.isMaxLength(WORKTREE_SETUP_ERROR_MAX_LENGTH))),
   sequence: NonNegativeInt,
@@ -92,6 +101,7 @@ export const WORKTREE_SETUP_STAGE_ORDER: ReadonlyArray<WorktreeSetupStageId> = [
   "agent",
   // Sandbox stages last, so begin()'s ORDER filter keeps each stage set's relative order.
   "provision",
+  "connect",
   "copy",
   "register",
   "start",
@@ -99,6 +109,7 @@ export const WORKTREE_SETUP_STAGE_ORDER: ReadonlyArray<WorktreeSetupStageId> = [
 
 export const WORKTREE_SETUP_SANDBOX_STAGE_ORDER: ReadonlyArray<WorktreeSetupStageId> = [
   "provision",
+  "connect",
   "copy",
   "register",
   "start",
@@ -125,7 +136,9 @@ export function worktreeSetupStageLabel(id: WorktreeSetupStageId): string {
     case "agent":
       return "Start agent";
     case "provision":
-      return "Provision sandbox";
+      return "Create sandbox";
+    case "connect":
+      return "Connect to sandbox";
     case "copy":
       return "Copy project";
     case "register":

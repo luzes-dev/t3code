@@ -264,8 +264,23 @@ function OutputTail({ lines, failed }: { lines: ReadonlyArray<string>; failed: b
 }
 
 function SetupDetails({ snapshot }: { snapshot: WorktreeSetupSnapshot }) {
+  const sandbox = snapshot.sandbox;
   return (
     <dl className="mt-1 mb-1.5 ml-8 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+      {sandbox ? (
+        <>
+          <dt className="text-foreground/80">Profile</dt>
+          <dd className="truncate font-mono">{sandbox.profile}</dd>
+          {sandbox.sandboxId ? (
+            <>
+              <dt className="text-foreground/80">Sandbox</dt>
+              <dd className="min-w-0 font-mono">
+                <MiddleTruncate value={sandbox.sandboxId} className="flex" />
+              </dd>
+            </>
+          ) : null}
+        </>
+      ) : null}
       {snapshot.branch ? (
         <>
           <dt className="text-foreground/80">Branch</dt>

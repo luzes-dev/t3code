@@ -4469,6 +4469,7 @@ it("keeps the working header in place across worktree setup handoff", () => {
     baseRef: "main",
     worktreePath: null,
     setupScript: null,
+    sandbox: null,
     stages: [],
     error: null,
     sequence: 3,

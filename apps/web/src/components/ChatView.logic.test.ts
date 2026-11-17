@@ -820,6 +820,7 @@ describe("worktree setup visibility", () => {
     baseRef: "main",
     worktreePath: null,
     setupScript: null,
+    sandbox: null,
     stages: [stage("checkout", "running"), stage("agent", "pending")],
     error: null,
     sequence: 1,

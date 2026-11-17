@@ -108,11 +108,18 @@ const make = Effect.gen(function* () {
           .trim()
           .replace(/\/+$/, "");
         const entries = yield* query(root, ["ls-files", "--stage", "-z"]);
-        if (entries.split("\0").some((entry) => entry.startsWith("160000 ")))
-          return yield* new WorktreeMcpFailure({
-            code: "invalid_request",
-            message: "Sandbox checkout transfer does not support Git submodules.",
-          });
+        // Gitlinks ship as their empty directory (an uninitialized submodule, which git
+        // reports clean); one whose checkout is missing locally cannot be archived.
+        const gitlinkPaths = entries
+          .split("\0")
+          .filter((entry) => entry.startsWith("160000 "))
+          .map((entry) => entry.slice(entry.indexOf("\t") + 1))
+          .filter((submodulePath) => submodulePath !== "");
+        const missingGitlinks = new Set<string>();
+        for (const submodulePath of gitlinkPaths) {
+          if (!(yield* fs.exists(path.join(root, submodulePath))))
+            missingGitlinks.add(submodulePath);
+        }
         const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cloud-checkout-" });
         const archiveMembers: string[] = [];
         const headCheck = yield* git.execute({
@@ -156,7 +163,7 @@ const make = Effect.gen(function* () {
           "-z",
         ]))
           .split("\0")
-          .filter((file) => file !== "" && !deleted.has(file));
+          .filter((file) => file !== "" && !deleted.has(file) && !missingGitlinks.has(file));
         const list = path.join(directory, "files");
         yield* fs.writeFileString(list, files.length === 0 ? "" : `${files.join("\0")}\0`);
         yield* run(
